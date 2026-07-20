@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import type { ScanResult, ScanPlanTask } from "@/app/api/onboarding/route";
 import Image from "next/image";
+import Link from "next/link";
 
 // Custom SVG Icons (to keep it light and avoid dependency issues)
 const CompassIcon = () => (
@@ -342,13 +343,13 @@ export default function Home() {
           </nav>
 
           <div>
-            <a
-              href="#scan-section"
+            <Link
+              href="/auth"
               className="bg-slate-900 text-white font-bold text-xs px-5 py-3 rounded-full hover:bg-slate-800 transition-all flex items-center shadow-sm"
             >
               <span>Book a Demo</span>
               <ArrowRightIcon className="w-3.5 h-3.5 ml-1.5" />
-            </a>
+            </Link>
           </div>
         </div>
       </header>
@@ -372,13 +373,13 @@ export default function Home() {
               </p>
 
               <div className="flex flex-col sm:flex-row items-center gap-4 w-full sm:w-auto">
-                <a
-                  href="#scan-section"
+                <Link
+                  href="/auth"
                   className="w-full sm:w-auto bg-[#f45815] hover:bg-[#e0470b] text-white font-extrabold text-sm px-8 py-4 rounded-full shadow-lg transition-all flex items-center justify-center gap-1.5"
                 >
                   <span>Get Started</span>
                   <ArrowRightIcon className="w-4 h-4 ml-1" />
-                </a>
+                </Link>
                 <a
                   href="#features-section"
                   className="w-full sm:w-auto bg-white/40 hover:bg-white/60 border border-[#f45815] text-[#f45815] font-extrabold text-sm px-8 py-4 rounded-full shadow-sm backdrop-blur-sm transition-all flex items-center justify-center"
@@ -1637,7 +1638,7 @@ export default function Home() {
           <div className="space-y-3">
             <h4 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">Product Features</h4>
             <ul className="space-y-2 text-xs text-slate-500 font-medium">
-              <li><a href="#scan-section" className="hover:text-slate-900 transition-colors">AI Discovery Scan</a></li>
+              <li><Link href="/auth" className="hover:text-slate-900 transition-colors">AI Discovery Scan</Link></li>
               <li><a href="#features-section" className="hover:text-slate-900 transition-colors">Multi-Agent Engine</a></li>
               <li><a href="#trust-ladder" className="hover:text-slate-900 transition-colors">Staged Trust Ladder</a></li>
               <li><a href="#features" className="hover:text-slate-900 transition-colors">24/7 Monitoring</a></li>
