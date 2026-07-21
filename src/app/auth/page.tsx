@@ -21,7 +21,7 @@ export default function AuthPage() {
   const [loading, setLoading] = useState(false);
   const [otpCode, setOtpCode] = useState("");
 
-  const handleFormSubmit = (e: React.FormEvent) => {
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     
@@ -35,36 +35,61 @@ export default function AuthPage() {
 
     setLoading(true);
     
-    // Simulate API call to send OTP
-    setTimeout(() => {
-      setLoading(false);
+    setLoading(true);
+    
+    try {
+      const res = await fetch("/api/auth/send-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to send OTP");
+
       setStep("otp");
-      setOtpCode("123456"); // Predefined OTP code for demo purposes
-    }, 1200);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+
   };
 
-  const handleOtpVerify = (e: React.FormEvent) => {
+  const handleOtpVerify = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     
-    if (otp !== "123456") {
-      setError("Invalid passcode. Please enter the correct code (123456).");
+    if (!otp || otp.length !== 6) {
+      setError("Please enter a valid 6-digit code.");
       return;
     }
 
     setLoading(true);
     
-    // Simulate successful verification
-    setTimeout(() => {
-      setLoading(false);
-      // Save session info
+    try {
+      const res = await fetch("/api/auth/verify-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, code: otp }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Invalid code");
+
+      // Save some local state if needed by the UI, but session is handled by secure cookies
       localStorage.setItem("gs_user", JSON.stringify({
         name: isSignUp ? name : email.split("@")[0],
         email: email,
         isAuthenticated: true
       }));
+      
       router.push("/dashboard");
-    }, 1000);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -220,16 +245,8 @@ export default function AuthPage() {
               </p>
             </div>
 
-            {/* OTP Demo Helper Info */}
-            <div className="bg-[#E79E24]/10 border border-[#E79E24]/20 p-3.5 rounded-2xl text-xs text-[#d97706] font-extrabold mb-5 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-[#E79E24] animate-ping" />
-                <span>Demo Passcode:</span>
-              </div>
-              <code className="bg-[#E79E24]/20 px-2 py-0.5 rounded text-sm select-all">123456</code>
-            </div>
-
             {error && (
+
               <div className="bg-red-500/10 border border-red-500/20 p-3 rounded-2xl text-xs text-red-700 font-bold mb-5 flex items-center gap-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
                 <span>{error}</span>

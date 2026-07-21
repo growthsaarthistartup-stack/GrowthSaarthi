@@ -45,11 +45,37 @@ export const telemetryEventEnum = pgEnum("telemetry_event", [
 ]);
 
 // ---------------------------------------------------------------------------
+// 0. Auth tables
+// ---------------------------------------------------------------------------
+
+export const users = pgTable("users", {
+  id:           text("id").primaryKey(), // ULID
+  email:        text("email").notNull().unique(),
+  createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const otps = pgTable("otps", {
+  id:           text("id").primaryKey(),
+  email:        text("email").notNull(),
+  code:         text("code").notNull(),
+  expiresAt:    timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const sessions = pgTable("sessions", {
+  id:           text("id").primaryKey(), // ULID (this serves as the session token in the cookie)
+  userId:       text("user_id").notNull().references(() => users.id),
+  expiresAt:    timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
 // 1. Startup — mutable root entity (config, not a fact)
 // ---------------------------------------------------------------------------
 
 export const startups = pgTable("startups", {
   id:           text("id").primaryKey(),                    // ULID
+  userId:       text("user_id").references(() => users.id), // Link to the user who created it
   name:         text("name").notNull(),
   url:          text("url"),
   industry:     text("industry"),
@@ -59,6 +85,7 @@ export const startups = pgTable("startups", {
   createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
 
 // ---------------------------------------------------------------------------
 // 2. WebsiteScan — append-only, never mutated

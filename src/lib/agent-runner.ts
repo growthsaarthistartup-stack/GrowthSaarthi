@@ -60,13 +60,30 @@ interface RawLLMOptions {
   outputSchema: z.ZodTypeAny;
 }
 
-async function callLLM(opts: RawLLMOptions): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
+let keyCallCounter = 0;
+
+function getOpenRouterApiKey(): string {
+  const keys = [
+    process.env.OPENROUTER_API_KEY1,
+    process.env.OPENROUTER_API_KEY2,
+    process.env.OPENROUTER_API_KEY,
+  ].filter((k): k is string => Boolean(k && k.trim().length > 0));
+
+  // Remove duplicates
+  const uniqueKeys = Array.from(new Set(keys));
+
+  if (uniqueKeys.length === 0) {
     throw new Error(
-      "OPENROUTER_API_KEY is not set. Add it to .env.local before running agents.",
+      "No OPENROUTER_API_KEY found. Add OPENROUTER_API_KEY1 or OPENROUTER_API_KEY to .env.local",
     );
   }
+
+  // Round-robin load balancing across keys to maximize free rate limits
+  return uniqueKeys[keyCallCounter++ % uniqueKeys.length];
+}
+
+async function callLLM(opts: RawLLMOptions): Promise<string> {
+  const apiKey = getOpenRouterApiKey();
 
   // Zod v4 ships z.toJSONSchema() as the official schema conversion utility.
   const jsonSchema = z.toJSONSchema(opts.outputSchema);
@@ -113,6 +130,21 @@ async function callLLM(opts: RawLLMOptions): Promise<string> {
   return content;
 }
 
+function extractJsonString(raw: string): string {
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    return cleaned.substring(firstBrace, lastBrace + 1);
+  }
+  const firstBracket = cleaned.indexOf("[");
+  const lastBracket = cleaned.lastIndexOf("]");
+  if (firstBracket !== -1 && lastBracket > firstBracket) {
+    return cleaned.substring(firstBracket, lastBracket + 1);
+  }
+  return cleaned;
+}
+
 // ---------------------------------------------------------------------------
 // render() — converts a context dict into a user message string
 // ---------------------------------------------------------------------------
@@ -157,8 +189,8 @@ export async function runAgent<TOutput extends z.ZodTypeAny>(
         outputSchema: contract.outputSchema,
       });
 
-      // Parse JSON — model might wrap it in markdown fences
-      const jsonStr = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+      // Parse JSON — model might wrap it in markdown fences or include commentary
+      const jsonStr = extractJsonString(raw);
       const parsed = contract.outputSchema.parse(JSON.parse(jsonStr)) as z.infer<TOutput>;
 
       // Citation check — if the output carries evidenceFactId, verify it exists

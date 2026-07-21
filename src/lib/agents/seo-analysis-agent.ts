@@ -16,6 +16,7 @@ import { writeAgentFailure } from "@/lib/db/repository";
 import { buildIdempotencyKey, todayWindow } from "@/lib/idempotency";
 import { writeRecommendation, calculateImpact } from "@/lib/scoring/recommendation-engine";
 import { generateSeoRecommendation } from "@/lib/agents/seo-recommendation-agent";
+import { fetchSeoScoreAudit } from "@/lib/integrations/seo-score-api";
 import type { RecommendationRow } from "@/lib/scoring/recommendation-engine";
 
 // ---------------------------------------------------------------------------
@@ -28,7 +29,12 @@ type SeoIssueType =
   | "keyword_gap_high_volume"
   | "slow_lcp"
   | "missing_sitemap"
-  | "no_schema_markup";
+  | "no_schema_markup"
+  | "missing_open_graph"
+  | "missing_llms_txt"
+  | "missing_dmarc_spf"
+  | "low_overall_seo_score"
+  | "api_audit_priority";
 
 const SEO_WEIGHTS: Record<SeoIssueType, { impact: number; effort: number }> = {
   missing_meta_description: { impact: 0.6, effort: 0.1 },
@@ -37,13 +43,18 @@ const SEO_WEIGHTS: Record<SeoIssueType, { impact: number; effort: number }> = {
   slow_lcp:                 { impact: 0.8, effort: 0.6 },
   missing_sitemap:          { impact: 0.5, effort: 0.05 },
   no_schema_markup:         { impact: 0.4, effort: 0.3 },
+  missing_open_graph:       { impact: 0.65, effort: 0.15 },
+  missing_llms_txt:         { impact: 0.85, effort: 0.1 },
+  missing_dmarc_spf:        { impact: 0.55, effort: 0.2 },
+  low_overall_seo_score:    { impact: 0.9, effort: 0.5 },
+  api_audit_priority:       { impact: 0.95, effort: 0.4 },
 };
 
 function scoreSeoIssue(
   issueType: SeoIssueType,
   volume?: number,
 ): { impact: number; effort: number; priorityScore: number } {
-  const base = SEO_WEIGHTS[issueType];
+  const base = SEO_WEIGHTS[issueType] ?? { impact: 0.7, effort: 0.3 };
   let impact = base.impact;
   // Volume-adjusted impact for keyword gaps
   if (issueType === "keyword_gap_high_volume" && volume != null) {
@@ -61,7 +72,7 @@ function scoreSeoIssue(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Issue detection — pure logic from scan + keyword facts
+// Issue detection — pure logic from scan + seoscoreapi.com + keyword facts
 // ---------------------------------------------------------------------------
 
 interface DetectedIssue {
@@ -77,6 +88,60 @@ async function detectIssues(
 ): Promise<DetectedIssue[]> {
   const issues: DetectedIssue[] = [];
 
+  // Fetch live audit from seoscoreapi.com (uses full API capacity)
+  const auditResult = await fetchSeoScoreAudit(scan.url);
+  const auditContext = auditResult ? {
+    overallScore: auditResult.score,
+    grade: auditResult.grade,
+    responseTime: auditResult.responseTime,
+  } : {};
+
+  // 1. Overall Audit Score & Grade Check (from seoscoreapi.com)
+  if (auditResult && (auditResult.score < 80 || auditResult.grade === "C" || auditResult.grade === "D" || auditResult.grade === "F")) {
+    issues.push({
+      type: "low_overall_seo_score",
+      evidenceFactId: scan.id,
+      context: {
+        issue: `Overall SEO Score is ${auditResult.score}/100 (Grade: ${auditResult.grade}). Needs comprehensive optimization across On-Page, GEO, and Technical performance.`,
+        score: auditResult.score,
+        grade: auditResult.grade,
+        url: scan.url,
+        ...auditContext,
+      },
+    });
+  }
+
+  // 2. Generative Engine Optimization (GEO) / LLM Readability Check
+  const llmReadability = auditResult?.aiReadability as Record<string, unknown> | undefined;
+  if (auditResult && (!llmReadability || llmReadability.has_llms_txt === false || llmReadability.llms_txt === false)) {
+    issues.push({
+      type: "missing_llms_txt",
+      evidenceFactId: scan.id,
+      context: {
+        issue: "Missing llms.txt file — Generative Engine Optimization (GEO) gap. AI search engines (Perplexity, ChatGPT, Claude) require an llms.txt file to accurately index and cite your brand.",
+        url: scan.url,
+        category: "Generative Engine Optimization (GEO)",
+        ...auditContext,
+      },
+    });
+  }
+
+  // 3. Social & Open Graph Metadata Check
+  const socialChecks = auditResult?.audit?.social?.checks;
+  const ogCheck = socialChecks?.find(c => c.name === "open_graph" || c.name === "og_tags");
+  if (ogCheck && ogCheck.status !== "pass") {
+    issues.push({
+      type: "missing_open_graph",
+      evidenceFactId: scan.id,
+      context: {
+        issue: "Open Graph social metadata missing or incomplete. Social media shares on LinkedIn, Facebook, and Twitter will lack rich titles and image previews.",
+        url: scan.url,
+        ...auditContext,
+      },
+    });
+  }
+
+  // 4. On-Page Basics
   if (!scan.metaDescription) {
     issues.push({
       type:          "missing_meta_description",
@@ -86,6 +151,7 @@ async function detectIssues(
         url:     scan.url,
         title:   scan.title,
         h1:      scan.h1,
+        ...auditContext,
       },
     });
   }
@@ -98,6 +164,7 @@ async function detectIssues(
         issue: "No H1 tag found on the page",
         url:   scan.url,
         title: scan.title,
+        ...auditContext,
       },
     });
   }
@@ -111,6 +178,7 @@ async function detectIssues(
         lcpMs:   scan.lcpMs,
         url:     scan.url,
         techStack: scan.techStack,
+        ...auditContext,
       },
     });
   }
@@ -119,11 +187,30 @@ async function detectIssues(
     issues.push({
       type:          "missing_sitemap",
       evidenceFactId: scan.id,
-      context: { issue: "No sitemap.xml detected", url: scan.url },
+      context: { issue: "No sitemap.xml detected", url: scan.url, ...auditContext },
     });
   }
 
-  // Keyword gaps with high volume
+  // 5. Incorporate High-Priority Audit Findings directly from seoscoreapi.com
+  if (auditResult?.priorities && Array.isArray(auditResult.priorities)) {
+    for (const prio of auditResult.priorities.slice(0, 2)) {
+      if (prio.title || prio.description) {
+        issues.push({
+          type: "api_audit_priority",
+          evidenceFactId: scan.id,
+          context: {
+            issue: prio.title || "SEO Audit High Priority Item",
+            description: prio.description,
+            impact: prio.impact || "high",
+            url: scan.url,
+            ...auditContext,
+          },
+        });
+      }
+    }
+  }
+
+  // 6. Keyword gaps with high volume
   const highVolumeGaps = await db
     .select()
     .from(keywords)
@@ -147,6 +234,7 @@ async function detectIssues(
         term:          kw.term,
         searchVolume:  kw.searchVolume,
         startupRanking: kw.startupRanking,
+        ...auditContext,
       },
     });
   }

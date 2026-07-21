@@ -69,6 +69,9 @@ export default function Home() {
   const [scanLogs, setScanLogs] = useState<string[]>([]);
   const [startupName, setStartupName] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
+  
+  // Auth State
+  const [user, setUser] = useState<{ id: string; email: string } | null>(null);
   const [startupStage, setStartupStage] = useState<"Idea" | "MVP" | "Growth">("MVP");
   const [primaryGoal, setPrimaryGoal] = useState<"acquisition" | "retention">("acquisition");
 
@@ -93,6 +96,22 @@ export default function Home() {
   const triggerToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
+  };
+
+  // Fetch session on load
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then(res => res.json())
+      .then(data => {
+        if (data.user) setUser(data.user);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleLogout = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    setUser(null);
+    triggerToast("Logged out successfully");
   };
 
   // Growth Plan Action Mock States (Approved, Edited, Ignored)
@@ -303,9 +322,9 @@ export default function Home() {
     <div className="min-h-screen bg-staggered-blocks text-slate-900 font-sans antialiased">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 border border-slate-800 px-5 py-4 rounded-full shadow-2xl text-white flex items-center gap-2.5 animate-bounce">
-          <div className="w-2.5 h-2.5 rounded-full bg-neon-lime animate-ping" />
-          <span className="text-sm font-extrabold tracking-tight">{toastMessage}</span>
+        <div className="fixed bottom-6 right-6 bg-slate-900 text-white px-6 py-3 rounded-2xl shadow-2xl animate-in slide-in-from-bottom-5 fade-in flex items-center gap-3 z-50">
+          <div className="w-2 h-2 rounded-full bg-green-400"></div>
+          <span className="font-medium text-sm">{toastMessage}</span>
         </div>
       )}
 
@@ -343,13 +362,32 @@ export default function Home() {
           </nav>
 
           <div>
-            <Link
-              href="/auth"
-              className="bg-slate-900 text-white font-bold text-xs px-5 py-3 rounded-full hover:bg-slate-800 transition-all flex items-center shadow-sm"
-            >
-              <span>Book a Demo</span>
-              <ArrowRightIcon className="w-3.5 h-3.5 ml-1.5" />
-            </Link>
+            {user ? (
+              <div className="flex items-center gap-4">
+                <span className="text-sm font-medium text-slate-600 hidden md:block">{user.email}</span>
+                <Link
+                  href="/dashboard"
+                  className="bg-slate-900 text-white font-bold text-xs px-5 py-3 rounded-full hover:bg-slate-800 transition-all flex items-center shadow-sm"
+                >
+                  <span>Dashboard</span>
+                  <ArrowRightIcon className="w-3.5 h-3.5 ml-1.5" />
+                </Link>
+                <button 
+                  onClick={handleLogout}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 transition-all shadow-sm"
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <Link
+                href="/auth"
+                className="bg-slate-900 text-white font-bold text-xs px-5 py-3 rounded-full hover:bg-slate-800 transition-all flex items-center shadow-sm"
+              >
+                <span>Book a Demo</span>
+                <ArrowRightIcon className="w-3.5 h-3.5 ml-1.5" />
+              </Link>
+            )}
           </div>
         </div>
       </header>

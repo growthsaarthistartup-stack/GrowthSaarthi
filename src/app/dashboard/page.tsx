@@ -24,6 +24,7 @@ interface ScoreMatrix {
 }
 
 interface Brand {
+  startupId: string;
   name: string;
   url: string;
   stage: string;
@@ -33,6 +34,43 @@ interface Brand {
   gaps: { title: string; description: string }[];
   opportunities: { title: string; description: string }[];
   tasks: Task[];
+}
+
+interface Competitor {
+  id: string;
+  name: string;
+  url: string;
+  heroCopy?: string | null;
+  positioningAngle?: string | null;
+  pricingModel?: string | null;
+}
+
+interface SeoRecommendation {
+  id: string;
+  category: string;
+  title: string;
+  description: string;
+  impactScore: number;
+  status: string;
+}
+
+interface ContentDraft {
+  id: string;
+  type: string;
+  content: string;
+  status: string;
+  createdAt: string;
+  recommendationId: string;
+}
+
+interface SeoAudit {
+  score: number;
+  grade: string;
+  priorities?: Array<{ title?: string; description?: string; impact?: string; category?: string }>;
+  audit?: {
+    meta?: { score?: number };
+    technical?: { score?: number };
+  };
 }
 
 export default function DashboardPage() {
@@ -71,10 +109,20 @@ export default function DashboardPage() {
   const opportunities = activeBrand?.opportunities ?? [];
   const tasks = activeBrand?.tasks ?? [];
 
-  // Selected task for draft review
+  // Selected task for draft review (modal)
   const [activeDraftTask, setActiveDraftTask] = useState<Task | null>(null);
   const [draftContent, setDraftContent] = useState("");
   const [draftTitle, setDraftTitle] = useState("");
+
+  // Live data from backend agents
+  const [liveCompetitors, setLiveCompetitors] = useState<Competitor[]>([]);
+  const [liveSeRecs, setLiveSeoRecs] = useState<SeoRecommendation[]>([]);
+  const [liveBlogDrafts, setLiveBlogDrafts] = useState<ContentDraft[]>([]);
+  const [liveSocialDrafts, setLiveSocialDrafts] = useState<ContentDraft[]>([]);
+  const [seoAudit, setSeoAudit] = useState<SeoAudit | null>(null);
+  const [tabLoading, setTabLoading] = useState(false);
+  const [approveLoading, setApproveLoading] = useState<number | null>(null);
+  const [approveError, setApproveError] = useState<string | null>(null);
 
   // Check auth session on load
   useEffect(() => {
@@ -167,6 +215,7 @@ export default function DashboardPage() {
         .then(data => {
           if (data.ok) {
             const newBrand: Brand = {
+              startupId: data.startupId ?? "mock_startup_id",
               name: startupName,
               url: websiteUrl || "devsking.com",
               stage: describeAnswer || "E-commerce",
@@ -187,8 +236,9 @@ export default function DashboardPage() {
           }
         })
         .catch(() => {
-          // Fallback Brand
+          // Fallback Brand (network / DB unavailable)
           const fallbackBrand: Brand = {
+            startupId: "mock_startup_id",
             name: startupName,
             url: websiteUrl || "devsking.com",
             stage: describeAnswer || "E-commerce",
@@ -292,101 +342,97 @@ export default function DashboardPage() {
     };
   }, []);
 
-  // Handle Task Action (Approve / Ignore / Edit)
-  const handleTaskStatusChange = (id: number, nextStatus: "approved" | "ignored") => {
+  // Handle Task Action — calls real API which invokes LLM agents (blog/social draft)
+  const handleTaskStatusChange = async (id: number, nextStatus: "approved" | "ignored") => {
     if (activeBrandIndex < 0) return;
 
-    setBrands(prev => {
-      return prev.map((brand, idx) => {
+    // Optimistic UI update immediately
+    setBrands(prev =>
+      prev.map((brand, idx) => {
         if (idx !== activeBrandIndex) return brand;
-        const updatedTasks = brand.tasks.map(t => 
-          t.id === id ? { ...t, status: nextStatus } : t
-        );
-        return { ...brand, tasks: updatedTasks };
-      });
-    });
+        return {
+          ...brand,
+          tasks: brand.tasks.map(t => t.id === id ? { ...t, status: nextStatus } : t),
+        };
+      })
+    );
+    setApproveError(null);
 
     const activeBrandData = brands[activeBrandIndex];
-    if (activeBrandData) {
-      const approvedTask = activeBrandData.tasks.find(t => t.id === id);
-      if (approvedTask && nextStatus === "approved") {
-        // Auto-generate content draft based on task type
-        let generatedContent = "";
-        let generatedTitle = approvedTask.title;
+    if (!activeBrandData) return;
 
-        if (approvedTask.agent.includes("Content") || approvedTask.agent.includes("SEO")) {
-          if (approvedTask.title.toLowerCase().includes("hero")) {
-            generatedTitle = "Website Hero Section Copy Draft";
-            generatedContent = `[Landing Page Copy Revision]
-Target Keywords: startup growth platform, automated playbooks
+    const task = activeBrandData.tasks.find(t => t.id === id);
+    if (!task) return;
 
---- H1 Tag (Proposed Update) ---
-"Autopilot your startup's growth loops in minutes."
+    const startupId = activeBrandData.startupId;
+    const recId     = task.recId;
 
---- H2 Subheading (Proposed Update) ---
-"GrowthSaarthi automatically connects your marketing tools, uncovers competitor positioning gaps, and launches high-converting campaigns with autonomous AI agents."
-
---- Primary Call to Action Button ---
-"Claim Your Live Growth Scan"
-
---- Secondary Button ---
-"Explore Case Studies"`;
-          } else if (approvedTask.title.toLowerCase().includes("blog")) {
-            generatedTitle = "SEO Article: Unlocking Autonomous Growth Autopilot";
-            generatedContent = `# Unlocking Startup Growth: The Shift to Autonomous AI Autopilots
-
-In the early stages of a startup, founders spend up to 40% of their day juggling operations instead of building products. Discover how autonomous growth systems are replacing conventional analytics dashboards.
-
-## 1. The Death of Static Dashboards
-Traditional tools like Google Analytics show you *what* happened, but never *why* or *how* to fix it. Autonomous agents bridge this gap by constantly auditing your site traffic and proposing pre-drafted adjustments.
-
-## 2. Ingesting Live Value-Prop Data
-By scraping search results and mapping competitor pricing models weekly, AI engines detect exactly where your product messaging overlaps with industry leaders.
-
-## 3. Taking Autopilot Action Safely
-With a structured "Trust Ladder", startup operators maintain full control, reviewing and approving blog articles, social posts, and meta details before anything goes live.
-
----
-*Ready to scale? Book a demo with GrowthSaarthi to audit your website today.*`;
-          } else {
-            generatedTitle = "LinkedIn Post Draft: How We Built GrowthSaarthi";
-            generatedContent = `🚀 Founders: Stop staring at empty dashboards. 
-
-Traditional analytics tell you what happened. 
-They don't tell you how to fix it. 
-
-We built GrowthSaarthi to change that:
-1. Scrapes competitor H1 tags & pricing tiers hourly.
-2. Identifies organic search keyword gaps.
-3. Automatically drafts blog posts and social content.
-4. Gated by a strict "Trust Ladder" so you hit publish.
-
-The result? Up to 15% increase in conversion rates in the first 30 days without hire costs.
-
-👉 What is your biggest bottleneck in customer acquisition right now? Let's discuss below.
-
-#GrowthMarketing #SaaSGrowth #FounderHack #AIAgents`;
-          }
-        } else if (approvedTask.agent.includes("Revenue")) {
-          generatedTitle = "Customer Retention: Dunning Email Sequence";
-          generatedContent = `Subject: ACTION REQUIRED: Update your billing details for [Company]
-
-Hi {{first_name}},
-
-We were unable to process your recent monthly payment. To prevent any interruptions to your workspace services, please take 30 seconds to update your billing profile:
-
-[Update Billing Details Link]
-
-If you have any questions or recently received a replacement card, feel free to reply directly to this email and our support team will help you out.
-
-Best,
-The Growth team`;
-        }
-
-        setDraftTitle(generatedTitle);
-        setDraftContent(generatedContent);
-        setActiveDraftTask({ ...approvedTask, status: nextStatus });
+    if (nextStatus === "ignored") {
+      // Call ignore endpoint if we have a real recId
+      if (recId && !recId.startsWith("rec_")) {
+        fetch(`/api/recommendations/${recId}/ignore`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startupId }),
+        }).catch(e => console.warn("[dashboard] ignore API error:", e));
       }
+      return;
+    }
+
+    // Approved — call real approve endpoint which triggers LLM draft agents
+    if (recId && !recId.startsWith("rec_")) {
+      setApproveLoading(id);
+      try {
+        const res = await fetch(`/api/recommendations/${recId}/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startupId }),
+        });
+        const data = await res.json();
+
+        if (data.ok && data.draftId) {
+          // Fetch the real LLM-generated draft content
+          const draftRes = await fetch(`/api/content-drafts?startupId=${startupId}`);
+          const draftData = await draftRes.json();
+          const draft = draftData.drafts?.find((d: ContentDraft) => d.id === data.draftId);
+
+          if (draft) {
+            let parsedContent = draft.content;
+            let parsedTitle = task.title;
+            try {
+              const parsed = JSON.parse(draft.content);
+              parsedContent = parsed.content ?? draft.content;
+              parsedTitle   = parsed.title ?? task.title;
+            } catch { /* content is plain text */ }
+
+            setDraftTitle(parsedTitle);
+            setDraftContent(parsedContent);
+            setActiveDraftTask({ ...task, status: nextStatus });
+          } else {
+            // Draft exists but not returned yet — show loading message
+            setDraftTitle(task.title);
+            setDraftContent("The AI agent is generating your draft. It will appear here shortly — check back in a few seconds.");
+            setActiveDraftTask({ ...task, status: nextStatus });
+          }
+        } else if (data.dispatched === "blocked") {
+          setApproveError(`Blocked: ${data.reason}`);
+        } else {
+          // Fallback: agent call succeeded but no draftId (e.g. non-content category)
+          setDraftTitle(task.title);
+          setDraftContent(`Action approved. The agent is executing: "${task.title}".\n\nStatus: ${data.dispatched ?? "queued"}\nTrust Level: ${data.trustLevel ?? "N/A"}`);
+          setActiveDraftTask({ ...task, status: nextStatus });
+        }
+      } catch (e) {
+        console.error("[dashboard] approve API error:", e);
+        setApproveError("Network error — please try again.");
+      } finally {
+        setApproveLoading(null);
+      }
+    } else {
+      // Mock recId (no DB) — show a confirmation modal without API call
+      setDraftTitle(task.title);
+      setDraftContent(`Task approved. Since this is a demo scan (no live database), the actual agent pipeline is not invoked.\n\nIn production, approving this task would:\n- Trigger the ${task.agent} to generate content\n- Route through the ExecutionGate trust ladder\n- Return an AI-drafted document for your review\n\nTask: ${task.title}\nSource: ${task.source}\nMetric target: ${task.metric}`);
+      setActiveDraftTask({ ...task, status: nextStatus });
     }
   };
 
@@ -406,6 +452,57 @@ The Growth team`;
     }
     setActiveDraftTask(null);
   };
+
+  // Fetch live tab data when switching to competitor / SEO / blog / social tabs
+  useEffect(() => {
+    const brand = activeBrandIndex >= 0 ? brands[activeBrandIndex] : null;
+    if (!brand || brand.startupId === "mock_startup_id") return;
+    const sid = brand.startupId;
+
+    if (activeTab === "competitors" && liveCompetitors.length === 0) {
+      setTabLoading(true);
+      fetch(`/api/competitors?startupId=${sid}`)
+        .then(r => r.json())
+        .then(d => { if (d.ok) setLiveCompetitors(d.competitors ?? []); })
+        .catch(e => console.warn("[dashboard] competitors fetch error:", e))
+        .finally(() => setTabLoading(false));
+    }
+
+    if (activeTab === "seo") {
+      setTabLoading(true);
+      Promise.all([
+        fetch(`/api/recommendations?startupId=${sid}`).then(r => r.json()),
+        brand.url && brand.url !== "devsking.com"
+          ? fetch(`/api/seo-audit?url=${encodeURIComponent(brand.url)}`).then(r => r.json()).catch(() => null)
+          : Promise.resolve(null),
+      ])
+        .then(([recsData, auditData]) => {
+          if (recsData?.ok) setLiveSeoRecs(recsData.recommendations ?? []);
+          if (auditData?.ok) setSeoAudit(auditData.audit ?? null);
+        })
+        .catch(e => console.warn("[dashboard] seo fetch error:", e))
+        .finally(() => setTabLoading(false));
+    }
+
+    if (activeTab === "blogs") {
+      setTabLoading(true);
+      fetch(`/api/content-drafts?startupId=${sid}&type=blog`)
+        .then(r => r.json())
+        .then(d => { if (d.ok) setLiveBlogDrafts(d.drafts ?? []); })
+        .catch(e => console.warn("[dashboard] blog drafts fetch error:", e))
+        .finally(() => setTabLoading(false));
+    }
+
+    if (activeTab === "socials") {
+      setTabLoading(true);
+      fetch(`/api/content-drafts?startupId=${sid}&type=linkedin`)
+        .then(r => r.json())
+        .then(d => { if (d.ok) setLiveSocialDrafts(d.drafts ?? []); })
+        .catch(e => console.warn("[dashboard] social drafts fetch error:", e))
+        .finally(() => setTabLoading(false));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, activeBrandIndex]);
 
   // Toggle markets selection
   const handleMarketSelect = (market: string) => {
@@ -526,7 +623,6 @@ The Growth team`;
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <span className="text-base">{item.icon}</span>
                   <span>{item.label}</span>
                 </div>
                 {item.id === "brand_create" && activeBrandIndex >= 0 && (
@@ -1063,19 +1159,23 @@ The Growth team`;
                           <span className="text-[10px] font-bold text-[#199874] bg-[#199874]/10 px-2 py-0.5 rounded-full">{task.agent}</span>
                         </div>
 
-                        {task.status === "pending" && (
+                         {task.status === "pending" && (
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => handleTaskStatusChange(task.id, "ignored")}
-                              className="text-[10px] text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl font-bold transition-all border border-slate-200 cursor-pointer"
+                              disabled={approveLoading === task.id}
+                              className="text-[10px] text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl font-bold transition-all border border-slate-200 cursor-pointer disabled:opacity-50"
                             >
                               Ignore
                             </button>
                             <button
                               onClick={() => handleTaskStatusChange(task.id, "approved")}
-                              className="text-[10px] bg-[#199874] hover:bg-[#158263] text-white px-4 py-1.5 rounded-xl font-extrabold transition-all shadow cursor-pointer"
+                              disabled={approveLoading === task.id}
+                              className="text-[10px] bg-[#199874] hover:bg-[#158263] text-white px-4 py-1.5 rounded-xl font-extrabold transition-all shadow cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
                             >
-                              Approve
+                              {approveLoading === task.id ? (
+                                <><span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />Generating...</>
+                              ) : "Approve"}
                             </button>
                           </div>
                         )}
@@ -1106,155 +1206,305 @@ The Growth team`;
             </div>
           )}
 
-          {/* TAB 3: SEO ANALYSIS */}
+          {/* TAB 3: SEO ANALYSIS — real data from recommendations + SEOScoreAPI */}
           {activeTab === "seo" && createState === "ready" && (
             <div className="space-y-6 max-w-4xl">
-              <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-sm">
-                <h3 className="text-base font-black text-slate-900 font-sans">Search Engine Indexation Audit</h3>
-                <p className="text-xs text-slate-500 font-semibold">Analysis results from Google search queries and target keyword metrics compared with competitors.</p>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Domain Authority</span>
-                    <strong className="text-lg font-black text-slate-800 block mt-1">24 / 100</strong>
-                  </div>
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Keywords Tracked</span>
-                    <strong className="text-lg font-black text-[#199874] block mt-1">118 Organic</strong>
-                  </div>
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Keyword Gap Opportunities</span>
-                    <strong className="text-lg font-black text-[#E79E24] block mt-1">12 Sized Gaps</strong>
-                  </div>
+              {tabLoading ? (
+                <div className="flex items-center justify-center py-16">
+                  <div className="w-8 h-8 border-4 border-slate-200 border-t-[#199874] rounded-full animate-spin" />
+                  <span className="ml-3 text-sm text-slate-500 font-bold">Loading SEO data...</span>
                 </div>
-              </div>
+              ) : (
+                <>
+                  {/* SEO Score Audit Header */}
+                  <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-sm">
+                    <h3 className="text-base font-black text-slate-900 font-sans">Search Engine Indexation Audit</h3>
+                    <p className="text-xs text-slate-500 font-semibold">Live analysis from SEOScoreAPI + AI recommendation engine. Results are based on the website URL you provided.</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+                      <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">SEO Score</span>
+                        <strong className="text-lg font-black text-slate-800 block mt-1">
+                          {seoAudit ? `${seoAudit.score} / 100` : `${scores.technical || "N/A"} / 100`}
+                        </strong>
+                        {seoAudit?.grade && <span className="text-xs text-[#199874] font-bold">Grade: {seoAudit.grade}</span>}
+                      </div>
+                      <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Recommendations Found</span>
+                        <strong className="text-lg font-black text-[#199874] block mt-1">
+                          {liveSeRecs.length > 0 ? `${liveSeRecs.length} Actions` : "Scanning..."}
+                        </strong>
+                      </div>
+                      <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Meta Score</span>
+                        <strong className="text-lg font-black text-[#E79E24] block mt-1">
+                          {seoAudit?.audit?.meta?.score != null ? `${seoAudit.audit.meta.score}%` : `${scores.validation || "N/A"}%`}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
 
-              {/* SEO Keyword Table */}
-              <div className="bg-white border border-slate-200 rounded-3xl p-6 overflow-hidden shadow-sm">
-                <h4 className="text-sm font-black text-slate-900 mb-4">High Value Search Gaps</h4>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-slate-100 text-slate-400 font-bold uppercase text-[10px] tracking-wider">
-                        <th className="pb-3">Search Term</th>
-                        <th className="pb-3">Monthly Vol</th>
-                        <th className="pb-3">Difficulty</th>
-                        <th className="pb-3 text-right">Competitor Rank</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 text-slate-655">
-                      {[
-                        { term: "startup growth autopilot", vol: 2400, diff: "34% (Low)", comp: "Rank 3 (ScaleEngine)" },
-                        { term: "autonomous seo scraper", vol: 1800, diff: "48% (Medium)", comp: "Rank 5 (SyncUp)" },
-                        { term: "stripe failed invoice workflow", vol: 950, diff: "22% (Easy)", comp: "Rank 1 (RetentionFly)" },
-                        { term: "ai content audit tools", vol: 3200, diff: "61% (Hard)", comp: "Rank 4 (ContentAudit)" }
-                      ].map((item, idx) => (
-                        <tr key={idx} className="hover:bg-slate-50 transition-colors">
-                          <td className="py-3.5 font-bold text-slate-900">{item.term}</td>
-                          <td className="py-3.5">{item.vol}</td>
-                          <td className="py-3.5">{item.diff}</td>
-                          <td className="py-3.5 text-right font-semibold text-[#E79E24]">{item.comp}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                  {/* SEO Priorities from SEOScoreAPI */}
+                  {seoAudit?.priorities && seoAudit.priorities.length > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+                      <h4 className="text-sm font-black text-slate-900 mb-4">Top Priorities from SEO Audit</h4>
+                      <div className="space-y-3">
+                        {seoAudit.priorities.slice(0, 5).map((p, i) => (
+                          <div key={i} className="bg-amber-50 border border-amber-100 rounded-2xl p-4">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
+                                p.impact === "high" ? "bg-red-100 text-red-700" :
+                                p.impact === "medium" ? "bg-amber-100 text-amber-700" :
+                                "bg-slate-100 text-slate-600"
+                              }`}>{p.impact?.toUpperCase() ?? "INFO"}</span>
+                              {p.category && <span className="text-[10px] font-bold text-slate-500">{p.category}</span>}
+                            </div>
+                            <h5 className="text-xs font-black text-slate-900">{p.title}</h5>
+                            {p.description && <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">{p.description}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* AI Recommendations from DB */}
+                  {liveSeRecs.length > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-3xl p-6 overflow-hidden shadow-sm">
+                      <h4 className="text-sm font-black text-slate-900 mb-4">AI Growth Recommendations</h4>
+                      <div className="space-y-3">
+                        {liveSeRecs.map(rec => (
+                          <div key={rec.id} className={`p-4 rounded-2xl border ${
+                            rec.status === "approved" ? "bg-[#199874]/5 border-[#199874]/20" :
+                            "bg-slate-50 border-slate-200"
+                          }`}>
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-[10px] font-black text-[#199874] bg-[#199874]/10 px-2 py-0.5 rounded-full">{rec.category}</span>
+                                  <span className="text-[10px] text-slate-400 font-bold">Impact: {(rec.impactScore * 100).toFixed(0)}%</span>
+                                </div>
+                                <h5 className="text-xs font-black text-slate-900">{rec.title}</h5>
+                                <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">{rec.description}</p>
+                              </div>
+                              {rec.status === "approved" && (
+                                <span className="text-[10px] text-[#199874] font-black bg-[#199874]/10 px-2 py-1 rounded-full shrink-0">Done</span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Empty state */}
+                  {!tabLoading && liveSeRecs.length === 0 && !seoAudit && (
+                    <div className="bg-white border border-dashed border-slate-300 rounded-3xl p-10 text-center shadow-sm">
+                      <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-4">
+                        <span className="text-slate-400 text-xl">📊</span>
+                      </div>
+                      <h4 className="font-black text-slate-700">No SEO Data Yet</h4>
+                      <p className="text-xs text-slate-500 mt-2 max-w-xs mx-auto">The SEO agent will populate this panel after the scan completes. Make sure your website URL is valid and publicly accessible.</p>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 
-          {/* TAB 4: COMPETITOR INSIGHTS */}
+          {/* TAB 4: COMPETITOR INSIGHTS — real data from competitor-agent */}
           {activeTab === "competitors" && createState === "ready" && (
             <div className="space-y-6 max-w-4xl">
               <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-sm">
                 <h3 className="text-base font-black text-slate-900">Competitor Positioning Overlaps</h3>
-                <p className="text-xs text-slate-500 font-semibold">Scraped data points from competitor homepages and target positioning vectors compared with your value proposition.</p>
+                <p className="text-xs text-slate-500 font-semibold">Real scraped data points from competitor homepages. Target positioning vectors are compared to your value proposition via vector similarity.</p>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3 shadow-sm">
-                  <div className="flex justify-between items-center">
-                    <h4 className="text-sm font-black text-slate-900">Competitor: SyncUp</h4>
-                    <span className="text-red-700 font-extrabold text-[10px] bg-red-500/10 px-2 py-0.5 rounded-full border border-red-500/10">82% Copy Overlap</span>
-                  </div>
-                  <p className="text-xs text-slate-505 leading-relaxed font-bold">
-                    <strong className="text-slate-800">H1 Copy Scraped:</strong> "Automate customer acquisitions and track funnel conversions effortlessly."
-                  </p>
-                  <p className="text-xs text-slate-550 leading-relaxed font-bold">
-                    <strong className="text-slate-800">Positioning Angle:</strong> Simplified marketing instrumentation.
-                  </p>
+              {tabLoading ? (
+                <div className="flex items-center justify-center py-16">
+                  <div className="w-8 h-8 border-4 border-slate-200 border-t-[#199874] rounded-full animate-spin" />
+                  <span className="ml-3 text-sm text-slate-500 font-bold">Loading competitor data...</span>
                 </div>
-
-                <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3 shadow-sm">
-                  <div className="flex justify-between items-center">
-                    <h4 className="text-sm font-black text-slate-900">Competitor: ScaleEngine</h4>
-                    <span className="text-[#d97706] font-extrabold text-[10px] bg-[#E79E24]/10 px-2 py-0.5 rounded-full border border-[#E79E24]/15">65% Copy Overlap</span>
-                  </div>
-                  <p className="text-xs text-slate-505 leading-relaxed font-bold">
-                    <strong className="text-slate-800">H1 Copy Scraped:</strong> "Scale SaaS conversions using data-driven automated playbooks."
-                  </p>
-                  <p className="text-xs text-slate-550 leading-relaxed font-bold">
-                    <strong className="text-slate-800">Positioning Angle:</strong> Standard templates and billing metrics.
-                  </p>
+              ) : liveCompetitors.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                  {liveCompetitors.map(comp => {
+                    return (
+                      <div key={comp.id} className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3 shadow-sm">
+                        <div className="flex justify-between items-start gap-3">
+                          <div>
+                            <h4 className="text-sm font-black text-slate-900">{comp.name}</h4>
+                            {comp.url && (
+                              <a href={comp.url} target="_blank" rel="noopener noreferrer" className="text-[11px] text-slate-400 font-bold hover:text-[#199874] transition-colors block mt-0.5">{comp.url}</a>
+                            )}
+                          </div>
+                          {comp.pricingModel && (
+                            <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200 shrink-0">{comp.pricingModel}</span>
+                          )}
+                        </div>
+                        {comp.heroCopy && (
+                          <p className="text-xs text-slate-600 leading-relaxed font-bold">
+                            <strong className="text-slate-800">H1 Copy Scraped:</strong> &ldquo;{comp.heroCopy}&rdquo;
+                          </p>
+                        )}
+                        {comp.positioningAngle && (
+                          <p className="text-xs text-slate-600 leading-relaxed font-bold">
+                            <strong className="text-slate-800">Positioning Angle:</strong> {comp.positioningAngle}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
-              </div>
+              ) : (
+                <div className="bg-white border border-dashed border-slate-300 rounded-3xl p-10 text-center shadow-sm">
+                  <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-4">
+                    <span className="text-slate-400 text-xl">👥</span>
+                  </div>
+                  <h4 className="font-black text-slate-700">No Competitors Found Yet</h4>
+                  <p className="text-xs text-slate-500 mt-2 max-w-xs mx-auto">The competitor discovery agent runs during the initial scan. Make sure your website URL was provided so the agent can analyze your niche.</p>
+                </div>
+              )}
             </div>
           )}
 
-          {/* TAB 5: BLOG DRAFTS */}
+          {/* TAB 5: BLOG DRAFTS — real contentDrafts from blog-draft-agent */}
           {activeTab === "blogs" && createState === "ready" && (
             <div className="space-y-6 max-w-4xl">
               <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
                 <h3 className="text-base font-black text-slate-900">Agent-Generated Blog Drafts</h3>
-                <p className="text-xs text-slate-500 mt-1 font-semibold">Review and copy the draft copy generated by Content Agent. Approval loops sync these drafts to staging CMS.</p>
+                <p className="text-xs text-slate-500 mt-1 font-semibold">AI-written blog posts produced by the Blog Draft Agent using your Brand Voice. Review and approve before publishing.</p>
               </div>
 
-              <div className="space-y-4">
-                {tasks.filter(t => t.agent.includes("Content") && t.title.toLowerCase().includes("blog")).map(t => (
-                  <div key={t.id} className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
-                    <div className="flex justify-between items-start gap-4">
-                      <div>
-                        <h4 className="text-sm font-black text-slate-900">Blog Draft: {t.title}</h4>
-                        <span className="text-[10px] font-bold text-[#199874] bg-[#199874]/10 px-2.5 py-1 rounded-full mt-1.5 inline-block">Draft Ready (Opus 4.8 Model)</span>
+              {tabLoading ? (
+                <div className="flex items-center justify-center py-16">
+                  <div className="w-8 h-8 border-4 border-slate-200 border-t-[#199874] rounded-full animate-spin" />
+                  <span className="ml-3 text-sm text-slate-500 font-bold">Loading blog drafts...</span>
+                </div>
+              ) : liveBlogDrafts.length > 0 ? (
+                <div className="space-y-4">
+                  {liveBlogDrafts.map(draft => {
+                    let parsedTitle = "Blog Draft";
+                    let parsedPreview = draft.content.slice(0, 200);
+                    try {
+                      const p = JSON.parse(draft.content);
+                      parsedTitle   = p.title ?? parsedTitle;
+                      parsedPreview = p.content?.slice(0, 200) ?? parsedPreview;
+                    } catch { /* plain text */ }
+                    return (
+                      <div key={draft.id} className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
+                        <div className="flex justify-between items-start gap-4">
+                          <div className="flex-1">
+                            <h4 className="text-sm font-black text-slate-900">{parsedTitle}</h4>
+                            <div className="flex items-center gap-2 mt-1.5">
+                              <span className="text-[10px] font-bold text-[#199874] bg-[#199874]/10 px-2.5 py-1 rounded-full">Blog • AI-Generated</span>
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                draft.status === "approved" ? "bg-[#199874]/10 text-[#199874]" : "bg-slate-100 text-slate-500"
+                              }`}>{draft.status.replace("_", " ")}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">{parsedPreview}...</p>
+                          </div>
+                          <button
+                            onClick={() => {
+                              let title = "Blog Draft";
+                              let content = draft.content;
+                              try { const p = JSON.parse(draft.content); title = p.title ?? title; content = p.content ?? content; } catch { /* plain */ }
+                              setDraftTitle(title);
+                              setDraftContent(content);
+                              // Use first matching task or create a minimal synthetic one
+                              const matchingTask = tasks.find(t => t.recId === draft.recommendationId);
+                              setActiveDraftTask(matchingTask ?? { id: 0, recId: draft.id, week: "", title, detail: content, status: "approved", source: "Blog Draft Agent", metric: "", agent: "Content Agent" });
+                            }}
+                            className="bg-[#199874] hover:bg-[#158263] text-white font-extrabold px-4 py-2 rounded-xl text-xs shadow transition-all cursor-pointer shrink-0"
+                          >
+                            View Full Draft
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        onClick={() => handleTaskStatusChange(t.id, "approved")}
-                        className="bg-[#199874] hover:bg-[#158263] text-white font-extrabold px-4 py-2 rounded-xl text-xs shadow transition-all cursor-pointer"
-                      >
-                        View Draft Details
-                      </button>
-                    </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="bg-white border border-dashed border-slate-300 rounded-3xl p-10 text-center shadow-sm">
+                  <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-4">
+                    <span className="text-slate-400 text-xl">✍️</span>
                   </div>
-                ))}
-              </div>
+                  <h4 className="font-black text-slate-700">No Blog Drafts Generated Yet</h4>
+                  <p className="text-xs text-slate-500 mt-2 max-w-xs mx-auto">Approve a content or SEO task in the Dashboard tab to trigger the Blog Draft Agent. It will generate a full AI-written article based on your brand voice.</p>
+                </div>
+              )}
             </div>
           )}
 
-          {/* TAB 6: SOCIAL DRAFTS */}
+          {/* TAB 6: SOCIAL DRAFTS — real contentDrafts from social-draft-agent */}
           {activeTab === "socials" && createState === "ready" && (
             <div className="space-y-6 max-w-4xl">
               <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
                 <h3 className="text-base font-black text-slate-900">Agent-Generated Social Drafts</h3>
-                <p className="text-xs text-slate-500 mt-1 font-semibold">Review, refine, and publish copy built by the Social Draft Agent (LinkedIn / Facebook campaigns).</p>
+                <p className="text-xs text-slate-500 mt-1 font-semibold">Platform-native LinkedIn & social copy produced by the Social Draft Agent. Review, refine, and publish.</p>
               </div>
 
-              <div className="space-y-4">
-                {tasks.filter(t => t.agent.includes("Content") && !t.title.toLowerCase().includes("blog") && !t.title.toLowerCase().includes("hero")).map(t => (
-                  <div key={t.id} className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
-                    <div className="flex justify-between items-start gap-4">
-                      <div>
-                        <h4 className="text-sm font-black text-slate-900">Social Campaign: {t.title}</h4>
-                        <span className="text-[10px] font-bold text-[#199874] bg-[#199874]/10 px-2.5 py-1 rounded-full mt-1.5 inline-block">Draft Ready (Sonnet 5 Model)</span>
+              {tabLoading ? (
+                <div className="flex items-center justify-center py-16">
+                  <div className="w-8 h-8 border-4 border-slate-200 border-t-[#199874] rounded-full animate-spin" />
+                  <span className="ml-3 text-sm text-slate-500 font-bold">Loading social drafts...</span>
+                </div>
+              ) : liveSocialDrafts.length > 0 ? (
+                <div className="space-y-4">
+                  {liveSocialDrafts.map(draft => {
+                    let parsedPlatform = draft.type;
+                    let parsedCopy = draft.content;
+                    let parsedHook = "";
+                    let parsedHashtags: string[] = [];
+                    try {
+                      const p = JSON.parse(draft.content);
+                      parsedPlatform  = p.platform ?? parsedPlatform;
+                      parsedCopy      = p.copy ?? parsedCopy;
+                      parsedHook      = p.hook ?? "";
+                      parsedHashtags  = p.hashtags ?? [];
+                    } catch { /* plain text */ }
+                    return (
+                      <div key={draft.id} className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
+                        <div className="flex justify-between items-start gap-4">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-[10px] font-bold text-[#199874] bg-[#199874]/10 px-2.5 py-1 rounded-full capitalize">{parsedPlatform} Post</span>
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                draft.status === "approved" ? "bg-[#199874]/10 text-[#199874]" : "bg-slate-100 text-slate-500"
+                              }`}>{draft.status.replace("_", " ")}</span>
+                            </div>
+                            {parsedHook && <p className="text-xs font-black text-slate-900 mb-1">{parsedHook}</p>}
+                            <p className="text-[11px] text-slate-500 leading-relaxed">{parsedCopy.slice(0, 200)}...</p>
+                            {parsedHashtags.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-2">
+                                {parsedHashtags.slice(0, 5).map(tag => (
+                                  <span key={tag} className="text-[10px] text-[#199874] font-bold">#{tag.replace(/^#/, "")}</span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => {
+                              setDraftTitle(`${parsedPlatform} Social Post`);
+                              setDraftContent(parsedCopy);
+                              const matchingTask = tasks.find(t => t.recId === draft.recommendationId);
+                              setActiveDraftTask(matchingTask ?? { id: 0, recId: draft.id, week: "", title: `${parsedPlatform} Social Post`, detail: parsedCopy, status: "approved", source: "Social Draft Agent", metric: "", agent: "Content Agent" });
+                            }}
+                            className="bg-[#199874] hover:bg-[#158263] text-white font-extrabold px-4 py-2 rounded-xl text-xs shadow transition-all cursor-pointer shrink-0"
+                          >
+                            View Full Copy
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        onClick={() => handleTaskStatusChange(t.id, "approved")}
-                        className="bg-[#199874] hover:bg-[#158263] text-white font-extrabold px-4 py-2 rounded-xl text-xs shadow transition-all cursor-pointer"
-                      >
-                        View Copy Details
-                      </button>
-                    </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="bg-white border border-dashed border-slate-300 rounded-3xl p-10 text-center shadow-sm">
+                  <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-4">
+                    <span className="text-slate-400 text-xl">📢</span>
                   </div>
-                ))}
-              </div>
+                  <h4 className="font-black text-slate-700">No Social Drafts Generated Yet</h4>
+                  <p className="text-xs text-slate-500 mt-2 max-w-xs mx-auto">Approve a social or content task in the Dashboard tab to trigger the Social Draft Agent. It will generate platform-native LinkedIn and Facebook copy.</p>
+                </div>
+              )}
             </div>
           )}
 

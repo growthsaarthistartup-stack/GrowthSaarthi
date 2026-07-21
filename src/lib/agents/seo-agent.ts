@@ -103,9 +103,9 @@ export async function runSeoIngestion(
       .limit(1);
 
     if (!integration) {
-      // Graceful skip — not a hard error, just not connected yet
+      // Graceful skip — GSC not connected, SEO analysis runs via SEOScoreAPI & WebsiteScan
       console.info(
-        `[seo-agent] No active GSC integration for ${startupId} — skipping SEO ingestion.`,
+        `[seo-agent] No active GSC integration for ${startupId} — fallback to SEOScoreAPI & WebsiteScan analysis.`,
       );
       return null;
     }
