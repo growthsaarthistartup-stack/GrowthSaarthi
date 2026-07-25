@@ -27,9 +27,9 @@ export const primaryGoalEnum  = pgEnum("primary_goal",  ["get_more_customers", "
 export const metricTypeEnum   = pgEnum("metric_type",   ["sessions", "conversions", "mrr", "churn_rate", "ltv"]);
 export const metricSourceEnum = pgEnum("metric_source", ["ga4", "stripe", "posthog", "manual"]);
 export const recStatusEnum    = pgEnum("rec_status",    ["pending", "approved", "edited", "ignored", "executed"]);
-export const contentTypeEnum  = pgEnum("content_type",  ["blog", "linkedin", "facebook", "meta_tag", "landing_page_copy"]);
+export const contentTypeEnum  = pgEnum("content_type",  ["blog", "linkedin", "facebook", "youtube", "instagram", "twitter", "meta_tag", "landing_page_copy"]);
 export const contentStatusEnum = pgEnum("content_status", ["pending_approval", "approved", "published", "rejected"]);
-export const integrationTypeEnum = pgEnum("integration_type", ["ga4", "gsc", "stripe", "posthog", "hubspot", "github", "clarity"]);
+export const integrationTypeEnum = pgEnum("integration_type", ["ga4", "gsc", "stripe", "posthog", "hubspot", "github", "clarity", "linkedin", "youtube", "facebook", "instagram", "twitter"]);
 export const connectionHealthEnum = pgEnum("connection_health", ["ok", "expired", "error"]);
 export const feedbackActionEnum = pgEnum("feedback_action", ["approved", "edited", "ignored"]);
 export const brandVoiceSourceEnum = pgEnum("brand_voice_source", ["onboarding_questionnaire", "existing_content_sample"]);
@@ -78,6 +78,7 @@ export const startups = pgTable("startups", {
   userId:       text("user_id").references(() => users.id), // Link to the user who created it
   name:         text("name").notNull(),
   url:          text("url"),
+  logoUrl:      text("logo_url"),
   industry:     text("industry"),
   stage:        startupStageEnum("stage").notNull().default("mvp"),
   country:      text("country"),
@@ -98,6 +99,7 @@ export const websiteScans = pgTable("website_scans", {
   createdAt:         timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 
   url:               text("url").notNull(),
+  logoUrl:           text("logo_url"),
   title:             text("title"),
   metaDescription:   text("meta_description"),
   h1:                text("h1"),

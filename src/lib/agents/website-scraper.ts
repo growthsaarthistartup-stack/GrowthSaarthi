@@ -189,6 +189,41 @@ export async function scrapeWebsite(
     const title           = $("title").first().text().trim() || null;
     const metaDescription = $('meta[name="description"]').attr("content")?.trim() || null;
     const h1              = $("h1").first().text().replace(/\s+/g, " ").trim() || null;
+    
+    // Find logo / favicon URL
+    let logoUrl: string | null = null;
+    try {
+      const parsedUrl = new URL(url);
+      const domain = parsedUrl.hostname;
+      
+      let extracted = $("link[rel='apple-touch-icon']").attr("href") ||
+                      $("link[rel='icon']").attr("href") ||
+                      $("link[rel='shortcut icon']").attr("href") ||
+                      $('meta[property="og:image"]').attr("content");
+                      
+      if (!extracted) {
+        $("img").each((_, el) => {
+          const src = $(el).attr("src");
+          const alt = $(el).attr("alt")?.toLowerCase() || "";
+          const id = $(el).attr("id")?.toLowerCase() || "";
+          const className = $(el).attr("class")?.toLowerCase() || "";
+          
+          if (src && (alt.includes("logo") || id.includes("logo") || className.includes("logo"))) {
+            extracted = src;
+            return false;
+          }
+        });
+      }
+      
+      if (extracted) {
+        logoUrl = new URL(extracted, url).href;
+      } else {
+        logoUrl = `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
+      }
+    } catch {
+      logoUrl = null;
+    }
+
     const heroCopy        = ($("[class*='hero'], [id*='hero'], main, [role='main']")
       .first()
       .text()
@@ -220,6 +255,7 @@ export async function scrapeWebsite(
         startupId,
         idempotencyKey,
         url,
+        logoUrl,
         title,
         metaDescription,
         h1,

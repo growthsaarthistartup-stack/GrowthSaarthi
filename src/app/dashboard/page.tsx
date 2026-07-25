@@ -34,6 +34,7 @@ interface Brand {
   gaps: { title: string; description: string }[];
   opportunities: { title: string; description: string }[];
   tasks: Task[];
+  logoUrl?: string | null;
 }
 
 interface Competitor {
@@ -78,7 +79,7 @@ export default function DashboardPage() {
   const [user, setUser] = useState<{ name: string; email: string } | null>(null);
   
   // Navigation Sidebar active tab
-  const [activeTab, setActiveTab] = useState<"brand_create" | "overview" | "seo" | "competitors" | "blogs" | "socials">("brand_create");
+  const [activeTab, setActiveTab] = useState<"brand_create" | "overview" | "seo" | "competitors" | "blogs" | "socials" | "social_connect">("brand_create");
   
   // Brand creation flow state: "input" | "step1" | "step2" | "step3" | "running" | "ready"
   const [createState, setCreateState] = useState<"input" | "step1" | "step2" | "step3" | "running" | "ready">("input");
@@ -101,6 +102,7 @@ export default function DashboardPage() {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [activeBrandIndex, setActiveBrandIndex] = useState<number>(-1);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [logoErrors, setLogoErrors] = useState<Record<string, boolean>>({});
 
   // Derived discovery results state
   const activeBrand = activeBrandIndex >= 0 ? brands[activeBrandIndex] : null;
@@ -123,6 +125,210 @@ export default function DashboardPage() {
   const [tabLoading, setTabLoading] = useState(false);
   const [approveLoading, setApproveLoading] = useState<number | null>(null);
   const [approveError, setApproveError] = useState<string | null>(null);
+
+  // Social integrations state
+  const [socialConnections, setSocialConnections] = useState<Record<string, { connected: boolean; handle?: string }>>({
+    linkedin:  { connected: false },
+    youtube:   { connected: false },
+    facebook:  { connected: false },
+    instagram: { connected: false },
+    twitter:   { connected: false },
+  });
+  const [connectModalOpen, setConnectModalOpen] = useState(false);
+  const [connectPlatform, setConnectPlatform] = useState<string>("");
+  const [connectPlatformLabel, setConnectPlatformLabel] = useState<string>("");
+  const [connectHandle, setConnectHandle] = useState("");
+  const [connectToken, setConnectToken] = useState("");
+
+  // Blog Wizard state
+  const [blogWizardOpen, setBlogWizardOpen] = useState(false);
+  const [blogWizardStep, setBlogWizardStep] = useState<"suggest" | "writing" | "review">("suggest");
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [blogSuggestions, setBlogSuggestions] = useState<Array<{ title: string; keywords: string[]; reason: string }>>([]);
+  const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1);
+  const [editedTitle, setEditedTitle] = useState("");
+  const [editedKeywords, setEditedKeywords] = useState("");
+  const [generatedBlog, setGeneratedBlog] = useState<{ id: string; title: string; content: string } | null>(null);
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
+  const [publishingLoading, setPublishingLoading] = useState(false);
+  const [publishSuccess, setPublishSuccess] = useState(false);
+  const [blogLogs, setBlogLogs] = useState<string[]>([]);
+
+  // Integrations action handlers
+  const handleConnectSocialClick = (platId: string, label: string) => {
+    setConnectPlatform(platId);
+    setConnectPlatformLabel(label);
+    setConnectHandle("");
+    setConnectToken("");
+    setConnectModalOpen(true);
+  };
+
+  const handleSaveSocialConnection = () => {
+    if (!activeBrand || !connectPlatform) return;
+    if (!connectHandle.trim()) {
+      alert("Please enter a handle/name!");
+      return;
+    }
+
+    const sid = activeBrand.startupId;
+    fetch("/api/integrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startupId: sid,
+        type: connectPlatform,
+        connected: true,
+        accessToken: connectToken || "simulated_token",
+        scopesJson: JSON.stringify({ handle: connectHandle })
+      })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.ok) {
+        setSocialConnections(prev => ({
+          ...prev,
+          [connectPlatform]: { connected: true, handle: connectHandle }
+        }));
+        setConnectModalOpen(false);
+      }
+    })
+    .catch(err => console.error("[dashboard] failed to save integration:", err));
+  };
+
+  const handleDisconnectSocial = (platId: string) => {
+    if (!activeBrand) return;
+    if (!window.confirm(`Are you sure you want to disconnect ${platId}?`)) return;
+
+    const sid = activeBrand.startupId;
+    fetch("/api/integrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startupId: sid,
+        type: platId,
+        connected: false
+      })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.ok) {
+        setSocialConnections(prev => ({
+          ...prev,
+          [platId]: { connected: false }
+        }));
+      }
+    })
+    .catch(err => console.error("[dashboard] failed to disconnect integration:", err));
+  };
+
+  // Blog Wizard action handlers
+  const handleGenerateSuggestions = () => {
+    if (!activeBrand) return;
+    setSuggestLoading(true);
+    fetch("/api/content-drafts/suggest-topics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startupId: activeBrand.startupId })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.ok && data.suggestions) {
+        setBlogSuggestions(data.suggestions);
+      }
+    })
+    .catch(err => console.error("[dashboard] suggest topics error:", err))
+    .finally(() => setSuggestLoading(false));
+  };
+
+  const handleGenerateBlog = () => {
+    if (!activeBrand || !editedTitle.trim()) return;
+    setBlogWizardStep("writing");
+    setBlogLogs(["[blog-draft-agent] Analyzing brand voice...", "[blog-draft-agent] Researching audience search behavior..."]);
+
+    const timer1 = setTimeout(() => {
+      setBlogLogs(prev => [...prev, `[blog-draft-agent] Target keywords: ${editedKeywords || "None"}`]);
+    }, 1500);
+
+    const timer2 = setTimeout(() => {
+      setBlogLogs(prev => [...prev, `[blog-draft-agent] Drafting outline...`]);
+    }, 3000);
+
+    const timer3 = setTimeout(() => {
+      setBlogLogs(prev => [...prev, `[blog-draft-agent] Writing article: "${editedTitle.substring(0, 40)}..."`]);
+    }, 4500);
+
+    fetch("/api/content-drafts/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startupId: activeBrand.startupId,
+        topic: `Title: ${editedTitle}\nKeywords: ${editedKeywords}`
+      })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.ok && data.draft) {
+        let title = editedTitle;
+        let content = data.draft.content;
+        try {
+          const parsed = JSON.parse(data.draft.content);
+          title = parsed.title || title;
+          content = parsed.content || content;
+        } catch {}
+        setGeneratedBlog({ id: data.draft.id, title, content });
+        setBlogWizardStep("review");
+        
+        // Pre-select all connected platforms by default
+        const connectedPlats = Object.entries(socialConnections)
+          .filter(([, v]) => v.connected)
+          .map(([k]) => k);
+        setSelectedPlatforms(connectedPlats);
+      } else {
+        alert("Blog generation failed. Please try again.");
+        setBlogWizardStep("suggest");
+      }
+    })
+    .catch(err => {
+      console.error("[dashboard] blog generation error:", err);
+      alert("Network error while generating blog.");
+      setBlogWizardStep("suggest");
+    })
+    .finally(() => {
+      clearTimeout(timer1);
+      clearTimeout(timer2);
+      clearTimeout(timer3);
+    });
+  };
+
+  const handlePublishBlog = () => {
+    if (!activeBrand || !generatedBlog) return;
+    setPublishingLoading(true);
+    fetch("/api/content-drafts/publish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startupId: activeBrand.startupId,
+        draftId: generatedBlog.id,
+        platforms: selectedPlatforms
+      })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.ok) {
+        setPublishSuccess(true);
+        // Refresh drafts list
+        fetch(`/api/content-drafts?startupId=${activeBrand.startupId}&type=blog`)
+          .then(r => r.json())
+          .then(d => { if (d.ok) setLiveBlogDrafts(d.drafts ?? []); });
+        // Also refresh social drafts list
+        fetch(`/api/content-drafts?startupId=${activeBrand.startupId}&type=linkedin`)
+          .then(r => r.json())
+          .then(d => { if (d.ok) setLiveSocialDrafts(d.drafts ?? []); });
+      }
+    })
+    .catch(err => console.error("[dashboard] publish blog error:", err))
+    .finally(() => setPublishingLoading(false));
+  };
 
   // Check auth session on load
   useEffect(() => {
@@ -156,6 +362,27 @@ export default function DashboardPage() {
     setCreateState("input");
     setActiveTab("brand_create");
     setIsDropdownOpen(false);
+  };
+
+  // Handle Delete Brand
+  const handleDeleteBrand = (idxToDelete: number) => {
+    if (!window.confirm("Are you sure you want to delete this brand?")) return;
+
+    setBrands(prev => {
+      const updated = prev.filter((_, idx) => idx !== idxToDelete);
+      
+      if (updated.length === 0) {
+        setActiveBrandIndex(-1);
+        setCreateState("input");
+        setActiveTab("brand_create");
+      } else if (idxToDelete === activeBrandIndex) {
+        setActiveBrandIndex(0);
+      } else if (idxToDelete < activeBrandIndex) {
+        setActiveBrandIndex(activeBrandIndex - 1);
+      }
+      
+      return updated;
+    });
   };
 
   // Handle Starting Website Scraping & Agents Workflow
@@ -224,7 +451,8 @@ export default function DashboardPage() {
               scores: data.scores,
               gaps: data.gaps,
               opportunities: data.opportunities,
-              tasks: data.plan
+              tasks: data.plan,
+              logoUrl: data.logoUrl || null
             };
             setBrands(prev => {
               const updated = [...prev, newBrand];
@@ -237,7 +465,7 @@ export default function DashboardPage() {
         })
         .catch(() => {
           // Fallback Brand (network / DB unavailable)
-          const fallbackBrand: Brand = {
+           const fallbackBrand: Brand = {
             startupId: "mock_startup_id",
             name: startupName,
             url: websiteUrl || "devsking.com",
@@ -245,6 +473,13 @@ export default function DashboardPage() {
             goal: fixAnswer || "Growth",
             markets: selectedMarkets,
             scores: { overall: 76, validation: 65, growth: 58, technical: 72 },
+            logoUrl: (() => {
+              try {
+                return websiteUrl ? `https://www.google.com/s2/favicons?sz=128&domain=${new URL(websiteUrl).hostname}` : null;
+              } catch {
+                return null;
+              }
+            })(),
             gaps: [
               {
                 title: "Value Proposition Overlap",
@@ -501,6 +736,37 @@ export default function DashboardPage() {
         .catch(e => console.warn("[dashboard] social drafts fetch error:", e))
         .finally(() => setTabLoading(false));
     }
+
+    if (activeTab === "social_connect" || activeTab === "blogs") {
+      fetch(`/api/integrations?startupId=${sid}`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok && d.integrations) {
+            const newConns: Record<string, { connected: boolean; handle?: string }> = {
+              linkedin:  { connected: false },
+              youtube:   { connected: false },
+              facebook:  { connected: false },
+              instagram: { connected: false },
+              twitter:   { connected: false },
+            };
+            d.integrations.forEach((item: any) => {
+              if (item.type in newConns) {
+                let handle = "";
+                try {
+                  const parsed = JSON.parse(item.scopesJson || "{}");
+                  handle = parsed.handle || "";
+                } catch {}
+                newConns[item.type as keyof typeof newConns] = {
+                  connected: item.connected,
+                  handle
+                };
+              }
+            });
+            setSocialConnections(newConns);
+          }
+        })
+        .catch(e => console.warn("[dashboard] integrations fetch error:", e));
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, activeBrandIndex]);
 
@@ -518,7 +784,8 @@ export default function DashboardPage() {
     { id: "seo", label: "SEO Analysis", icon: "📈", disabled: activeBrandIndex < 0 },
     { id: "competitors", label: "Competitor Insights", icon: "👥", disabled: activeBrandIndex < 0 },
     { id: "blogs", label: "Blog Drafts", icon: "✍️", disabled: activeBrandIndex < 0 },
-    { id: "socials", label: "Social Drafts", icon: "📢", disabled: activeBrandIndex < 0 }
+    { id: "socials", label: "Social Drafts", icon: "📢", disabled: activeBrandIndex < 0 },
+    { id: "social_connect", label: "Social Connect", icon: "🔗", disabled: activeBrandIndex < 0 }
   ] as const;
 
   const marketsList = {
@@ -556,8 +823,17 @@ export default function DashboardPage() {
                 className="p-4 mx-3 my-4 bg-white hover:bg-slate-100 border border-slate-200 rounded-2xl flex items-center justify-between gap-3 cursor-pointer select-none transition-colors shadow-sm"
               >
                 <div className="flex items-center gap-3 overflow-hidden">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-[#199874] to-[#E79E24] flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-sm">
-                    {activeBrand?.url ? activeBrand.url.replace(/https?:\/\//, "").substring(0, 2).toUpperCase() : "GS"}
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-[#199874] to-[#E79E24] flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-sm overflow-hidden relative">
+                    {activeBrand?.logoUrl && !logoErrors[activeBrand.url] ? (
+                      <img
+                        src={activeBrand.logoUrl}
+                        alt={`${activeBrand.name} Logo`}
+                        className="w-full h-full object-cover p-1 bg-white"
+                        onError={() => setLogoErrors(prev => ({ ...prev, [activeBrand.url]: true }))}
+                      />
+                    ) : (
+                      activeBrand?.url ? activeBrand.url.replace(/https?:\/\//, "").substring(0, 2).toUpperCase() : "GS"
+                    )}
                   </div>
                   <div className="overflow-hidden text-left">
                     <p className="text-xs font-bold text-slate-900 truncate">{activeBrand?.url || "puravidamindbody.com"}</p>
@@ -581,8 +857,17 @@ export default function DashboardPage() {
                           idx === activeBrandIndex ? "bg-slate-50/80" : ""
                         }`}
                       >
-                        <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-[#199874] to-[#E79E24] flex items-center justify-center font-extrabold text-white text-xs shrink-0 shadow-sm">
-                          {brand.url.replace(/https?:\/\//, "").substring(0, 2).toUpperCase()}
+                        <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-[#199874] to-[#E79E24] flex items-center justify-center font-extrabold text-white text-xs shrink-0 shadow-sm overflow-hidden relative">
+                          {brand.logoUrl && !logoErrors[brand.url] ? (
+                            <img
+                              src={brand.logoUrl}
+                              alt={`${brand.name} Logo`}
+                              className="w-full h-full object-cover p-0.5 bg-white"
+                              onError={() => setLogoErrors(prev => ({ ...prev, [brand.url]: true }))}
+                            />
+                          ) : (
+                            brand.url.replace(/https?:\/\//, "").substring(0, 2).toUpperCase()
+                          )}
                         </div>
                         <div className="overflow-hidden flex-1">
                           <p className="text-xs font-bold text-slate-900 truncate">{brand.url}</p>
@@ -688,6 +973,12 @@ export default function DashboardPage() {
                         type="text"
                         value={websiteUrl}
                         onChange={(e) => setWebsiteUrl(e.target.value)}
+                        onBlur={() => {
+                          const val = websiteUrl.trim();
+                          if (val && !/^https?:\/\//i.test(val)) {
+                            setWebsiteUrl(`https://${val}`);
+                          }
+                        }}
                         placeholder="your-store.com"
                         className="w-full bg-slate-50 border border-slate-200 rounded-2xl pl-10 pr-4 py-4 text-slate-900 placeholder-slate-400 text-sm focus:outline-none focus:border-[#199874] focus:ring-1 focus:ring-[#199874] transition-all"
                       />
@@ -708,10 +999,13 @@ export default function DashboardPage() {
 
                     <button
                       onClick={() => {
-                        if (!websiteUrl.trim()) {
+                        const val = websiteUrl.trim();
+                        if (!val) {
                           alert("Please enter a website link first!");
                           return;
                         }
+                        const normalized = /^https?:\/\//i.test(val) ? val : `https://${val}`;
+                        setWebsiteUrl(normalized);
                         setCreateState("step1");
                       }}
                       className="w-full bg-gradient-to-r from-[#199874] to-[#E79E24] hover:from-[#1da881] hover:to-[#f0ab35] text-white font-extrabold py-4 rounded-2xl shadow-lg transition-all tracking-wider text-sm flex items-center justify-center gap-2 cursor-pointer"
@@ -1007,8 +1301,17 @@ export default function DashboardPage() {
                         }`}
                       >
                         <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-[#199874] to-[#E79E24] flex items-center justify-center font-black text-white text-base shadow">
-                            {brand.url.replace(/https?:\/\//, "").substring(0, 2).toUpperCase()}
+                          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-[#199874] to-[#E79E24] flex items-center justify-center font-black text-white text-base shadow overflow-hidden relative">
+                            {brand.logoUrl && !logoErrors[brand.url] ? (
+                              <img
+                                src={brand.logoUrl}
+                                alt={`${brand.name} Logo`}
+                                className="w-full h-full object-cover p-1 bg-white"
+                                onError={() => setLogoErrors(prev => ({ ...prev, [brand.url]: true }))}
+                              />
+                            ) : (
+                              brand.url.replace(/https?:\/\//, "").substring(0, 2).toUpperCase()
+                            )}
                           </div>
                           <div>
                             <h4 className="font-extrabold text-slate-900 text-sm">{brand.name}</h4>
@@ -1018,11 +1321,25 @@ export default function DashboardPage() {
                             </span>
                           </div>
                         </div>
-                        {idx === activeBrandIndex && (
-                          <span className="text-xs text-[#199874] font-black uppercase tracking-wider bg-[#199874]/10 px-3 py-1.5 border border-[#199874]/20 rounded-full shadow-sm">
-                            Active Brand
-                          </span>
-                        )}
+                        <div className="flex items-center gap-3">
+                          {idx === activeBrandIndex && (
+                            <span className="text-xs text-[#199874] font-black uppercase tracking-wider bg-[#199874]/10 px-3 py-1.5 border border-[#199874]/20 rounded-full shadow-sm">
+                              Active Brand
+                            </span>
+                          )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteBrand(idx);
+                            }}
+                            className="p-2 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors duration-200 cursor-pointer"
+                            title="Delete Brand"
+                          >
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1368,9 +1685,26 @@ export default function DashboardPage() {
           {/* TAB 5: BLOG DRAFTS — real contentDrafts from blog-draft-agent */}
           {activeTab === "blogs" && createState === "ready" && (
             <div className="space-y-6 max-w-4xl">
-              <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
-                <h3 className="text-base font-black text-slate-900">Agent-Generated Blog Drafts</h3>
-                <p className="text-xs text-slate-500 mt-1 font-semibold">AI-written blog posts produced by the Blog Draft Agent using your Brand Voice. Review and approve before publishing.</p>
+              <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+                <div>
+                  <h3 className="text-base font-black text-slate-900">Agent-Generated Blog Drafts</h3>
+                  <p className="text-xs text-slate-500 mt-1 font-semibold">AI-written blog posts produced by the Blog Draft Agent using your Brand Voice. Review and approve before publishing.</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setBlogWizardStep("suggest");
+                    setBlogSuggestions([]);
+                    setSelectedSuggestionIndex(-1);
+                    setEditedTitle("");
+                    setEditedKeywords("");
+                    setGeneratedBlog(null);
+                    setPublishSuccess(false);
+                    setBlogWizardOpen(true);
+                  }}
+                  className="bg-[#199874] hover:bg-[#158263] text-white font-extrabold px-5 py-3 rounded-xl text-xs shadow-md transition-all cursor-pointer shrink-0"
+                >
+                  + Write a Blog
+                </button>
               </div>
 
               {tabLoading ? (
@@ -1507,6 +1841,442 @@ export default function DashboardPage() {
               )}
             </div>
           )}
+
+          {/* TAB 7: SOCIAL CONNECTIONS */}
+          {activeTab === "social_connect" && createState === "ready" && (
+            <div className="space-y-6 max-w-4xl">
+              <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+                <h3 className="text-base font-black text-slate-900">Connect Social Channels</h3>
+                <p className="text-xs text-slate-500 mt-1 font-semibold">Integrate your startup's social media platforms to automatically publish content generated by GrowthSaarthi agents.</p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {[
+                  {
+                    id: "linkedin",
+                    label: "LinkedIn",
+                    color: "bg-[#0077B5]",
+                    icon: (
+                      <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14m-.5 15.5v-5.3a3.26 3.26 0 0 0-3.26-3.26c-.85 0-1.84.52-2.32 1.3v-1.11h-2.79v8.37h2.79v-4.93c0-.77.62-1.4 1.39-1.4a1.4 1.4 0 0 1 1.4 1.4v4.93h2.79M6.88 8.56a1.68 1.68 0 0 0 1.68-1.68c0-.93-.75-1.69-1.68-1.69a1.69 1.69 0 0 0-1.69 1.69c0 .93.76 1.68 1.69 1.68m1.39 9.94v-8.37H5.5v8.37h2.77z"/>
+                      </svg>
+                    )
+                  },
+                  {
+                    id: "twitter",
+                    label: "X (Twitter)",
+                    color: "bg-[#000000]",
+                    icon: (
+                      <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                      </svg>
+                    )
+                  },
+                  {
+                    id: "facebook",
+                    label: "Facebook",
+                    color: "bg-[#1877F2]",
+                    icon: (
+                      <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M22 12c0-5.52-4.48-10-10-10S2 6.48 2 12c0 4.84 3.44 8.87 8 9.8V15H8v-3h2V9.5C10 7.57 11.57 6 13.5 6H16v3h-2c-.55 0-1 .45-1 1v2h3v3h-3v6.95c4.56-.93 8-4.96 8-9.75z"/>
+                      </svg>
+                    )
+                  },
+                  {
+                    id: "instagram",
+                    label: "Instagram",
+                    color: "bg-gradient-to-tr from-[#f9ce34] via-[#ee2a7b] to-[#6228d7]",
+                    icon: (
+                      <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
+                        <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
+                        <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
+                      </svg>
+                    )
+                  },
+                  {
+                    id: "youtube",
+                    label: "YouTube",
+                    color: "bg-[#FF0000]",
+                    icon: (
+                      <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.108C19.52 3.5 12 3.5 12 3.5s-7.52 0-9.388.555A3.002 3.002 0 0 0 .502 6.163C0 8.03 0 12 0 12s0 3.97.502 5.837a3.003 3.003 0 0 0 2.11 2.108C4.48 20.5 12 20.5 12 20.5s7.52 0 9.388-.555a3.003 3.003 0 0 0 2.11-2.108C24 15.97 24 12 24 12s0-3.97-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+                      </svg>
+                    )
+                  }
+                ].map(plat => {
+                  const conn = socialConnections[plat.id] || { connected: false };
+                  return (
+                    <div key={plat.id} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm flex flex-col justify-between h-44 font-sans">
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-10 h-10 rounded-xl ${plat.color} flex items-center justify-center text-white text-lg shadow-sm shrink-0`}>
+                            {plat.icon}
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-slate-900 text-sm">{plat.label}</h4>
+                            <p className="text-[10px] text-slate-400 font-bold capitalize mt-0.5">{plat.id}</p>
+                          </div>
+                        </div>
+                        <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
+                          conn.connected ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-400"
+                        }`}>
+                          {conn.connected ? "Connected" : "Disconnected"}
+                        </span>
+                      </div>
+
+                      <div className="mt-4">
+                        {conn.connected ? (
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold text-slate-600 truncate max-w-[120px]">{conn.handle || "Active Channel"}</span>
+                            <button
+                              onClick={() => handleDisconnectSocial(plat.id)}
+                              className="text-red-500 hover:text-red-600 font-bold cursor-pointer"
+                            >
+                              Disconnect
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => handleConnectSocialClick(plat.id, plat.label)}
+                            className="w-full py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 font-bold rounded-xl text-xs transition-colors cursor-pointer"
+                          >
+                            Connect Channel
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* SOCIAL CONNECT MODAL */}
+          {connectModalOpen && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex justify-center items-center z-50 p-4 font-sans animate-fade-in animate-duration-200">
+              <div className="bg-white border border-slate-200 w-full max-w-md rounded-3xl p-6 sm:p-8 space-y-5 shadow-2xl flex flex-col">
+                <div className="flex justify-between items-center">
+                  <h3 className="text-base font-black text-slate-900">Connect {connectPlatformLabel}</h3>
+                  <button
+                    onClick={() => setConnectModalOpen(false)}
+                    className="text-slate-400 hover:text-slate-800 font-extrabold text-lg cursor-pointer"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Account Handle / Name *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g., @mybrandname"
+                      value={connectHandle}
+                      onChange={(e) => setConnectHandle(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 text-xs focus:outline-none focus:border-[#199874] transition-colors"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">OAuth Access Token / API Key</label>
+                    <input
+                      type="password"
+                      placeholder="Simulated OAuth Token"
+                      value={connectToken}
+                      onChange={(e) => setConnectToken(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 text-xs focus:outline-none focus:border-[#199874] transition-colors"
+                    />
+                    <p className="text-[10px] text-slate-400 font-medium leading-relaxed">Leave blank to use default simulated sandbox connection.</p>
+                  </div>
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={() => setConnectModalOpen(false)}
+                    className="flex-1 bg-white hover:bg-slate-50 text-slate-500 border border-slate-200 font-bold py-3 rounded-xl text-xs transition-all cursor-pointer shadow-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveSocialConnection}
+                    className="flex-1 bg-[#199874] hover:bg-[#158263] text-white font-extrabold py-3 rounded-xl text-xs shadow-md transition-all cursor-pointer"
+                  >
+                    Save Connection
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* BLOG CREATION WIZARD MODAL */}
+          {blogWizardOpen && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex justify-center items-center z-50 p-4 font-sans animate-fade-in animate-duration-200">
+              <div className="bg-white border border-slate-200 w-full max-w-2xl rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+                
+                <div className="flex justify-between items-center shrink-0">
+                  <div>
+                    <span className="text-[9px] font-black text-[#199874] uppercase tracking-wider bg-[#199874]/10 px-2.5 py-1 rounded-full border border-[#199874]/15">
+                      Blog Creator Wizard
+                    </span>
+                    <h3 className="text-lg font-black text-slate-900 mt-2">
+                      {blogWizardStep === "suggest" ? "Step 1: Ideation & Keywords" : blogWizardStep === "writing" ? "Step 2: AI Agent Writing" : "Step 3: Review & Publish"}
+                    </h3>
+                  </div>
+                  <button
+                    onClick={() => setBlogWizardOpen(false)}
+                    className="text-slate-400 hover:text-slate-800 font-extrabold text-lg cursor-pointer"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                {/* Step Content */}
+                <div className="flex-1 overflow-y-auto min-h-[300px] py-1">
+                  
+                  {/* Step 1: Ideation & Keywords */}
+                  {blogWizardStep === "suggest" && (
+                    <div className="space-y-6">
+                      <p className="text-xs text-slate-500 font-semibold leading-relaxed">
+                        Generate blog topic suggestions and targeted SEO keyword lists based on your landing page scan. Choose a topic below or write your own.
+                      </p>
+
+                      {blogSuggestions.length === 0 ? (
+                        <div className="bg-slate-50 border border-dashed border-slate-200 rounded-2xl p-8 text-center space-y-4">
+                          <span className="text-2xl block">💡</span>
+                          <h4 className="font-extrabold text-slate-700 text-sm">Need Title and Keyword Ideas?</h4>
+                          <button
+                            onClick={handleGenerateSuggestions}
+                            disabled={suggestLoading}
+                            className="bg-[#199874] hover:bg-[#158263] text-white font-extrabold px-6 py-3 rounded-xl text-xs shadow transition-all cursor-pointer disabled:opacity-50"
+                          >
+                            {suggestLoading ? "Generating Suggestions..." : "Generate AI Suggestions"}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">AI Suggestions</label>
+                          <div className="grid grid-cols-1 gap-3">
+                            {blogSuggestions.map((sug, idx) => (
+                              <div
+                                key={idx}
+                                onClick={() => {
+                                  setSelectedSuggestionIndex(idx);
+                                  setEditedTitle(sug.title);
+                                  setEditedKeywords(sug.keywords.join(", "));
+                                }}
+                                className={`p-4 rounded-xl border text-left cursor-pointer transition-all space-y-2 ${
+                                  selectedSuggestionIndex === idx
+                                    ? "bg-[#199874]/5 border-[#199874] text-slate-900"
+                                    : "bg-white border-slate-200 hover:bg-slate-55"
+                                }`}
+                              >
+                                <h5 className="font-extrabold text-xs text-slate-900">{sug.title}</h5>
+                                <p className="text-[10px] text-slate-400 font-bold leading-normal">{sug.reason}</p>
+                                <div className="flex flex-wrap gap-1">
+                                  {sug.keywords.map(kw => (
+                                    <span key={kw} className="text-[9px] font-extrabold text-[#199874] bg-[#199874]/5 px-2 py-0.5 rounded-full border border-[#199874]/10">
+                                      {kw}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-4 pt-2">
+                        <div className="space-y-2">
+                          <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Blog Title *</label>
+                          <input
+                            type="text"
+                            value={editedTitle}
+                            onChange={(e) => setEditedTitle(e.target.value)}
+                            placeholder="e.g., How to Scale E-commerce Operations"
+                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 text-xs focus:outline-none focus:border-[#199874] transition-colors"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Target Keywords (comma-separated)</label>
+                          <input
+                            type="text"
+                            value={editedKeywords}
+                            onChange={(e) => setEditedKeywords(e.target.value)}
+                            placeholder="e.g., e-commerce scale, scaling logistics, shopify tips"
+                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 text-xs focus:outline-none focus:border-[#199874] transition-colors"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Step 2: Writing Article Progress */}
+                  {blogWizardStep === "writing" && (
+                    <div className="space-y-8 flex flex-col justify-between py-8">
+                      <div className="text-center space-y-3">
+                        <div className="w-12 h-12 border-4 border-slate-200 border-t-[#199874] rounded-full animate-spin mx-auto mb-2" />
+                        <h4 className="font-black text-slate-900 text-base">Blog Draft Agent is writing...</h4>
+                        <p className="text-xs text-slate-500 font-semibold">Using your brand voice config & scraped landing page keywords.</p>
+                      </div>
+
+                      <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200 font-mono text-[10px] text-slate-500 overflow-y-auto max-h-[180px] space-y-2 text-left">
+                        {blogLogs.map((log, idx) => (
+                          <div key={idx} className="flex items-start gap-2">
+                            <span className="text-[#199874]">✓</span>
+                            <span className="text-slate-700 font-bold">{log}</span>
+                          </div>
+                        ))}
+                        <div className="flex items-center gap-2 text-[#E79E24] animate-pulse">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#E79E24]" />
+                          <span>Generating title, meta descriptions, and full blog post structure...</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Step 3: Review & Publish */}
+                  {blogWizardStep === "review" && generatedBlog && (
+                    <div className="space-y-6 text-left">
+                      {publishSuccess ? (
+                        <div className="py-8 text-center space-y-4 animate-fade-in animate-duration-200">
+                          <div className="w-16 h-16 rounded-full bg-emerald-100 flex items-center justify-center mx-auto text-emerald-600 text-3xl">
+                            ✓
+                          </div>
+                          <h4 className="font-black text-slate-950 text-lg">Successfully Published!</h4>
+                          <p className="text-xs text-slate-500 max-w-sm mx-auto font-semibold leading-relaxed">
+                            Your blog post has been generated and saved. {selectedPlatforms.length > 0 ? `Simulated shares were pushed successfully to ${selectedPlatforms.map(p => p === "twitter" ? "X (Twitter)" : p.toUpperCase()).join(", ")}!` : "No social sharing was selected."}
+                          </p>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="space-y-2">
+                            <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Generated Article Title</label>
+                            <input
+                              type="text"
+                              value={generatedBlog.title}
+                              onChange={(e) => setGeneratedBlog(prev => prev ? { ...prev, title: e.target.value } : null)}
+                              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 text-xs focus:outline-none focus:border-[#199874] font-black transition-colors"
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Article Content</label>
+                            <textarea
+                              value={generatedBlog.content}
+                              onChange={(e) => setGeneratedBlog(prev => prev ? { ...prev, content: e.target.value } : null)}
+                              className="w-full h-64 bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-mono text-slate-700 focus:outline-none focus:border-[#199874] leading-relaxed resize-none shadow-inner"
+                            />
+                          </div>
+
+                          <div className="space-y-3 pt-2">
+                            <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Where would you like to post?</label>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                              {[
+                                { id: "linkedin", label: "LinkedIn" },
+                                { id: "twitter", label: "X (Twitter)" },
+                                { id: "facebook", label: "Facebook" },
+                                { id: "instagram", label: "Instagram" },
+                                { id: "youtube", label: "YouTube" }
+                              ].map(plat => {
+                                const isConnected = socialConnections[plat.id]?.connected;
+                                const isChecked = selectedPlatforms.includes(plat.id);
+                                return (
+                                  <label
+                                    key={plat.id}
+                                    className={`flex items-center gap-2.5 p-3 rounded-xl border text-xs font-bold transition-all ${
+                                      !isConnected 
+                                        ? "bg-slate-50 border-slate-100 text-slate-400 cursor-not-allowed opacity-60"
+                                        : isChecked
+                                          ? "bg-[#199874]/5 border-[#199874] text-slate-900 cursor-pointer"
+                                          : "bg-white border-slate-200 hover:bg-slate-55 cursor-pointer"
+                                    }`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      disabled={!isConnected}
+                                      checked={isChecked}
+                                      onChange={(e) => {
+                                        if (e.target.checked) {
+                                          setSelectedPlatforms(prev => [...prev, plat.id]);
+                                        } else {
+                                          setSelectedPlatforms(prev => prev.filter(p => p !== plat.id));
+                                        }
+                                      }}
+                                      className="accent-[#199874] w-4 h-4 cursor-pointer"
+                                    />
+                                    <div>
+                                      <span>{plat.label}</span>
+                                      {!isConnected && <span className="block text-[8px] text-slate-400 font-normal">Not connected</span>}
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                </div>
+
+                {/* Footer Buttons */}
+                <div className="flex gap-3 pt-4 border-t border-slate-100 shrink-0">
+                  {blogWizardStep === "suggest" && (
+                    <>
+                      <button
+                        onClick={() => setBlogWizardOpen(false)}
+                        className="flex-1 bg-white hover:bg-slate-50 text-slate-500 border border-slate-200 font-bold py-3.5 rounded-xl text-xs transition-all cursor-pointer shadow-sm"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleGenerateBlog}
+                        disabled={!editedTitle.trim()}
+                        className="flex-1 bg-[#199874] hover:bg-[#158263] text-white font-extrabold py-3.5 rounded-xl text-xs shadow-lg transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        Write Article
+                      </button>
+                    </>
+                  )}
+
+                  {blogWizardStep === "review" && (
+                    <>
+                      {publishSuccess ? (
+                        <button
+                          onClick={() => setBlogWizardOpen(false)}
+                          className="w-full bg-[#199874] hover:bg-[#158263] text-white font-extrabold py-3.5 rounded-xl text-xs shadow-md transition-all cursor-pointer"
+                        >
+                          Finish & Close
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => setBlogWizardStep("suggest")}
+                            className="flex-1 bg-white hover:bg-slate-50 text-slate-500 border border-slate-200 font-bold py-3.5 rounded-xl text-xs transition-all cursor-pointer shadow-sm"
+                          >
+                            Back to Title
+                          </button>
+                          <button
+                            onClick={handlePublishBlog}
+                            disabled={publishingLoading}
+                            className="flex-1 bg-gradient-to-r from-[#199874] to-[#E79E24] hover:from-[#1da881] hover:to-[#f0ab35] text-white font-extrabold py-3.5 rounded-xl text-xs shadow-lg transition-all cursor-pointer"
+                          >
+                            {publishingLoading ? "Publishing..." : "Publish Blog & Share"}
+                          </button>
+                        </>
+                      )}
+                    </>
+                  )}
+                </div>
+
+              </div>
+            </div>
+          )}
+
 
         </div>
       </main>

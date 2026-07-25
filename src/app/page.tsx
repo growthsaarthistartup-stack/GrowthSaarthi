@@ -156,6 +156,14 @@ export default function Home() {
       triggerToast("Please enter your startup's name first!");
       return;
     }
+
+    // Normalize URL with https:// if it is provided but missing the protocol
+    let normalizedUrl = websiteUrl.trim();
+    if (normalizedUrl && !/^https?:\/\//i.test(normalizedUrl)) {
+      normalizedUrl = `https://${normalizedUrl}`;
+      setWebsiteUrl(normalizedUrl);
+    }
+
     setScanStep("scanning");
     setScanProgress(0);
     setScanLogs([]);
@@ -164,7 +172,7 @@ export default function Home() {
     // ── SSE progress stream ────────────────────────────────────────────────
     const progressParams = new URLSearchParams({
       startupName,
-      websiteUrl,
+      websiteUrl:  normalizedUrl,
       stage:       startupStage,
       primaryGoal,
     });
@@ -199,7 +207,7 @@ export default function Home() {
     fetch("/api/onboarding", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ startupName, websiteUrl, stage: startupStage, primaryGoal }),
+      body:    JSON.stringify({ startupName, websiteUrl: normalizedUrl, stage: startupStage, primaryGoal }),
     })
       .then((r) => r.json())
       .then((json: { ok?: boolean } & Partial<ScanResult>) => {
@@ -855,6 +863,12 @@ export default function Home() {
                       type="url"
                       value={websiteUrl}
                       onChange={(e) => setWebsiteUrl(e.target.value)}
+                      onBlur={() => {
+                        const val = websiteUrl.trim();
+                        if (val && !/^https?:\/\//i.test(val)) {
+                          setWebsiteUrl(`https://${val}`);
+                        }
+                      }}
                       placeholder="e.g., https://acme.co"
                       className="w-full bg-[#f8fafc] border border-slate-200 rounded-2xl px-4 py-3.5 text-slate-900 text-sm focus:outline-none focus:border-slate-900 transition-colors"
                     />

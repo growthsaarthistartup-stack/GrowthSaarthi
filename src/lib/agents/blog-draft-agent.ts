@@ -30,8 +30,8 @@ import { buildIdempotencyKey, todayWindow } from "@/lib/idempotency";
 const BlogDraftSchema = z.object({
   title:       z.string().max(160),
   content:     z.string().min(200),   // minimum viable blog post
-  metaTitle:   z.string().max(60).optional(),
-  metaDesc:    z.string().max(160).optional(),
+  metaTitle:   z.string().max(150).optional(),
+  metaDesc:    z.string().max(500).optional(),
 });
 
 type BlogDraft = z.infer<typeof BlogDraftSchema>;

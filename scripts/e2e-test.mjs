@@ -3,7 +3,8 @@
  * Run with: node --experimental-vm-modules scripts/e2e-test.mjs
  */
 
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.local" });
 
 let passed = 0;
 let failed = 0;
@@ -134,7 +135,7 @@ for (const table of tables) {
     const sql = neon(process.env.DATABASE_URL);
     const rows = await sql`SELECT COUNT(*) as cnt FROM information_schema.tables WHERE table_name = ${table} AND table_schema = 'public'`;
     if (rows[0].cnt === "0") throw new Error(`Table "${table}" not found in DB`);
-    const count = await sql`SELECT COUNT(*) as cnt FROM ${sql(table)}`;
+    const count = await sql.query(`SELECT COUNT(*) as cnt FROM ${table}`);
     return `${count[0].cnt} rows`;
   });
 }

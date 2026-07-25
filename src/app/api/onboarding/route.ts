@@ -66,6 +66,7 @@ export interface ScanResult {
   gaps:          ScanGap[];
   opportunities: ScanOpportunity[];
   plan:          ScanPlanTask[];
+  logoUrl?:      string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +241,18 @@ export async function POST(request: NextRequest): Promise<Response> {
   if (compResult.status === "rejected") console.error("[onboarding] competitor-agent threw:", compResult.reason);
   if (seoResult.status  === "rejected") console.error("[onboarding] seo-agent threw:",  seoResult.reason);
 
+  // Update startup's logoUrl if scraper found it
+  let logoUrl: string | null = null;
+  if (scanResult.status === "fulfilled" && scanResult.value) {
+    logoUrl = scanResult.value.logoUrl;
+    if (logoUrl) {
+      await db.update(startups)
+        .set({ logoUrl, updatedAt: new Date() })
+        .where(eq(startups.id, startupId))
+        .catch((err) => console.error("[onboarding] failed to update startup logoUrl:", err));
+    }
+  }
+
   // ── 3. Analysis — SEO recommendations (may be empty on first run) ─────────
   await runSeoAnalysis(startupId).catch(() => null);
 
@@ -336,6 +349,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     gaps,
     opportunities,
     plan: planTasks,
+    logoUrl,
   };
 
   await logEvent(startupId, "report_delivered", { overallScore: healthScore.overall });

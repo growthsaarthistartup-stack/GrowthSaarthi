@@ -1,4 +1,5 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.local" });
 const key = process.env.SEO_SCORE_API_KEY;
 const res = await fetch(`https://seoscoreapi.com/audit?url=${encodeURIComponent("https://example.com")}`, {
   headers: { "Authorization": `Bearer ${key}`, "x-api-key": key, "Accept": "application/json" },
