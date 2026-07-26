@@ -44,6 +44,8 @@ interface Competitor {
   heroCopy?: string | null;
   positioningAngle?: string | null;
   pricingModel?: string | null;
+  pricingTiers?: string[] | null;
+  features?: string[] | null;
 }
 
 interface SeoRecommendation {
@@ -71,6 +73,15 @@ interface SeoAudit {
   audit?: {
     meta?: { score?: number };
     technical?: { score?: number };
+  };
+  categories?: {
+    onPage?: any[];
+    geo?: any[];
+    usability?: any[];
+    performance?: any[];
+    social?: any[];
+    local?: any[];
+    tech?: any[];
   };
 }
 
@@ -712,11 +723,18 @@ export default function DashboardPage() {
     if (!brand || brand.startupId === "mock_startup_id") return;
     const sid = brand.startupId;
 
-    if (activeTab === "competitors" && liveCompetitors.length === 0) {
+    if (activeTab === "competitors") {
       setTabLoading(true);
-      fetch(`/api/competitors?startupId=${sid}`)
-        .then(r => r.json())
-        .then(d => { if (d.ok) setLiveCompetitors(d.competitors ?? []); })
+      setLiveCompetitors([]);
+      setPositioningGaps([]);
+      Promise.all([
+        fetch(`/api/competitors?startupId=${sid}`).then(r => r.json()).catch(() => null),
+        fetch(`/api/positioning-gaps?startupId=${sid}`).then(r => r.json()).catch(() => null),
+      ])
+        .then(([compData, gapData]) => {
+          if (compData?.ok) setLiveCompetitors(compData.competitors ?? []);
+          if (gapData?.ok) setPositioningGaps(gapData.gaps ?? []);
+        })
         .catch(e => console.warn("[dashboard] competitors fetch error:", e))
         .finally(() => setTabLoading(false));
     }
@@ -725,8 +743,8 @@ export default function DashboardPage() {
       setTabLoading(true);
       Promise.all([
         fetch(`/api/recommendations?startupId=${sid}`).then(r => r.json()),
-        brand.url && brand.url !== "devsking.com"
-          ? fetch(`/api/seo-audit?url=${encodeURIComponent(brand.url)}`).then(r => r.json()).catch(() => null)
+        brand.url
+          ? fetch(`/api/seo-audit?url=${encodeURIComponent(brand.url)}&startupId=${sid}`).then(r => r.json()).catch(() => null)
           : Promise.resolve(null),
       ])
         .then(([recsData, auditData]) => {
@@ -794,13 +812,7 @@ export default function DashboardPage() {
         .catch(e => console.warn("[dashboard] alerts fetch error:", e));
     }
 
-    // Fetch positioning gaps when on competitors tab
-    if (activeTab === "competitors" && activeBrand) {
-      fetch(`/api/positioning-gaps?startupId=${activeBrand.startupId}`)
-        .then(r => r.json())
-        .then(d => { if (d.ok) setPositioningGaps(d.gaps ?? []); })
-        .catch(() => setPositioningGaps([]));
-    }
+    // competitors + positioning-gaps are fetched together above when activeTab === "competitors"
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, activeBrandIndex]);
 
@@ -1706,53 +1718,211 @@ export default function DashboardPage() {
           {/* TAB 4: COMPETITOR INSIGHTS — real data from competitor-agent */}
           {activeTab === "competitors" && createState === "ready" && (
             <div className="space-y-6 max-w-4xl">
-              <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-sm">
-                <h3 className="text-base font-black text-slate-900">Competitor Positioning Overlaps</h3>
-                <p className="text-xs text-slate-500 font-semibold">Real scraped data points from competitor homepages. Target positioning vectors are compared to your value proposition via vector similarity.</p>
+              {/* Header */}
+              <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-3 shadow-sm">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-black text-slate-900">Competitor Analysis</h3>
+                    <p className="text-xs text-slate-500 font-semibold mt-1">Real scraped positioning data compared to your brand via vector similarity. Gaps &amp; opportunities are AI-generated from live data.</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const brand = activeBrandIndex >= 0 ? brands[activeBrandIndex] : null;
+                      if (!brand) return;
+                      setTabLoading(true);
+                      setLiveCompetitors([]);
+                      setPositioningGaps([]);
+                      fetch(`/api/analyze?startupId=${brand.startupId}`, { method: "POST" })
+                        .finally(() => Promise.all([
+                          fetch(`/api/competitors?startupId=${brand.startupId}`).then(r => r.json()).catch(() => null),
+                          fetch(`/api/positioning-gaps?startupId=${brand.startupId}`).then(r => r.json()).catch(() => null),
+                        ])
+                          .then(([compData, gapData]) => {
+                            if (compData?.ok) setLiveCompetitors(compData.competitors ?? []);
+                            if (gapData?.ok) setPositioningGaps(gapData.gaps ?? []);
+                          })
+                          .finally(() => setTabLoading(false)));
+                    }}
+                    className="bg-[#199874] hover:bg-[#158263] text-white font-extrabold px-5 py-2.5 rounded-xl text-xs shadow-md transition-all cursor-pointer shrink-0 whitespace-nowrap"
+                  >
+                    ↻ Refresh Analysis
+                  </button>
+                </div>
+                {liveCompetitors.length > 0 && (
+                  <div className="flex flex-wrap gap-3 pt-2 border-t border-slate-100">
+                    <div className="flex items-center gap-1.5 text-xs text-slate-600 font-bold">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+                      {liveCompetitors.length} competitor{liveCompetitors.length !== 1 ? "s" : ""} found
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs text-slate-600 font-bold">
+                      <span className="w-2 h-2 rounded-full bg-purple-500 inline-block" />
+                      {positioningGaps.length} positioning gap{positioningGaps.length !== 1 ? "s" : ""} identified
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs text-slate-500 font-semibold">
+                      <span className="w-2 h-2 rounded-full bg-slate-300 inline-block" />
+                      Industry: {(activeBrand as any)?.industry || "Startup"}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {tabLoading ? (
                 <div className="flex items-center justify-center py-16">
                   <div className="w-8 h-8 border-4 border-slate-200 border-t-[#199874] rounded-full animate-spin" />
-                  <span className="ml-3 text-sm text-slate-500 font-bold">Loading competitor data...</span>
+                  <span className="ml-3 text-sm text-slate-500 font-bold">Discovering and analyzing competitors…</span>
                 </div>
               ) : liveCompetitors.length > 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                  {liveCompetitors.map(comp => {
-                    return (
-                      <div key={comp.id} className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3 shadow-sm">
-                        <div className="flex justify-between items-start gap-3">
-                          <div>
-                            <h4 className="text-sm font-black text-slate-900">{comp.name}</h4>
-                            {comp.url && (
-                              <a href={comp.url} target="_blank" rel="noopener noreferrer" className="text-[11px] text-slate-400 font-bold hover:text-[#199874] transition-colors block mt-0.5">{comp.url}</a>
+                <>
+                  {/* Side-by-side matrix */}
+                  <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
+                    <h4 className="text-sm font-black text-slate-900">Side-by-Side Competitive Matrix</h4>
+                    <p className="text-xs text-slate-500 font-semibold">Comparison of value propositions, pricing, and features. Your row is highlighted in green.</p>
+                    <div className="overflow-x-auto border border-slate-100 rounded-2xl">
+                      <table className="min-w-full divide-y divide-slate-200 text-xs">
+                        <thead className="bg-slate-50 font-black text-slate-700">
+                          <tr>
+                            <th className="px-4 py-3 text-left">Company</th>
+                            <th className="px-4 py-3 text-left">Positioning / Value Prop</th>
+                            <th className="px-4 py-3 text-left">Starting Price</th>
+                            <th className="px-4 py-3 text-left">Key Features</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white font-medium text-slate-600">
+                          {/* Your startup row */}
+                          <tr className="bg-emerald-50/40 font-bold text-emerald-950 border-l-4 border-emerald-500">
+                            <td className="px-4 py-3">
+                              <div className="font-extrabold">{activeBrand?.name} <span className="text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded ml-1 uppercase">You</span></div>
+                              {activeBrand?.url && <a href={activeBrand.url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-slate-400 hover:text-emerald-600 underline decoration-dotted block mt-0.5">{activeBrand.url}</a>}
+                            </td>
+                            <td className="px-4 py-3">{(activeBrand as any)?.industry || "Your Services"}</td>
+                            <td className="px-4 py-3 text-[#199874]">Contact for Pricing</td>
+                            <td className="px-4 py-3">
+                              <div className="flex flex-wrap gap-1">
+                                {seoAudit?.categories?.tech && seoAudit.categories.tech.length > 0
+                                  ? seoAudit.categories.tech.slice(0, 3).map((c: any, i: number) => (
+                                    <span key={i} className="text-[9px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full border border-emerald-200">{c.label?.replace(/\s+\(.*\)/g, "") || c.name}</span>
+                                  ))
+                                  : <span className="text-[9px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full border border-emerald-200">Custom Stack</span>
+                                }
+                              </div>
+                            </td>
+                          </tr>
+                          {/* Competitor rows */}
+                          {liveCompetitors.map(comp => (
+                            <tr key={comp.id} className="hover:bg-slate-50/50 transition-colors">
+                              <td className="px-4 py-3">
+                                <div className="font-bold text-slate-950">
+                                  <a href={comp.url || "#"} target="_blank" rel="noopener noreferrer" className="hover:text-[#199874] underline decoration-dotted">{comp.name}</a>
+                                </div>
+                                {comp.url && <div className="text-[10px] text-slate-400 truncate max-w-[160px]">{comp.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}</div>}
+                              </td>
+                              <td className="px-4 py-3 max-w-[220px]">
+                                <p className="line-clamp-3 text-slate-700 leading-relaxed">{comp.positioningAngle || comp.heroCopy?.slice(0, 100) || "—"}</p>
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className="font-bold text-amber-700">{comp.pricingModel || "—"}</span>
+                                {comp.pricingTiers && comp.pricingTiers.length > 0 && (
+                                  <div className="mt-1 flex flex-col gap-0.5">
+                                    {comp.pricingTiers.slice(0, 3).map((tier: string, i: number) => (
+                                      <span key={i} className="text-[9px] text-slate-500 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded">{tier}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex flex-wrap gap-1">
+                                  {comp.features && comp.features.length > 0
+                                    ? comp.features.slice(0, 5).map((f: string, idx: number) => (
+                                      <span key={idx} className="text-[9px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full border border-slate-200">{f}</span>
+                                    ))
+                                    : <span className="text-[10px] text-slate-400">Parsing…</span>
+                                  }
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Deep-dive cards */}
+                  <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
+                    <h4 className="text-sm font-black text-slate-900">Competitor Deep-Dives</h4>
+                    <p className="text-xs text-slate-500 font-semibold">Scraped homepage copy and extracted insights for each identified competitor.</p>
+                    <div className="grid grid-cols-1 gap-4">
+                      {liveCompetitors.map(comp => (
+                        <div key={comp.id + "_deep"} className="border border-slate-200 rounded-2xl p-4 space-y-3 bg-slate-50/40">
+                          <div className="flex justify-between items-start gap-2">
+                            <div>
+                              <a href={comp.url || "#"} target="_blank" rel="noopener noreferrer" className="text-sm font-extrabold text-slate-900 hover:text-[#199874] underline decoration-dotted">{comp.name}</a>
+                              <div className="text-[10px] text-slate-400 mt-0.5">{comp.url}</div>
+                            </div>
+                            {comp.pricingModel && (
+                              <span className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full shrink-0">{comp.pricingModel}</span>
                             )}
                           </div>
-                          {comp.pricingModel && (
-                            <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200 shrink-0">{comp.pricingModel}</span>
+                          {comp.positioningAngle && (
+                            <div className="text-xs text-slate-700 leading-relaxed bg-white border border-slate-100 rounded-xl p-3">
+                              <strong className="text-[10px] font-black text-slate-500 uppercase tracking-wide block mb-1">Positioning Angle</strong>
+                              {comp.positioningAngle}
+                            </div>
+                          )}
+                          {comp.heroCopy && (
+                            <div className="text-xs text-slate-500 leading-relaxed italic border-l-4 border-slate-200 pl-3">
+                              <strong className="text-[10px] font-black text-slate-400 not-italic uppercase tracking-wide block mb-1">Scraped Homepage Copy</strong>
+                              &ldquo;{comp.heroCopy.slice(0, 300)}{comp.heroCopy.length > 300 ? "…" : ""}&rdquo;
+                            </div>
+                          )}
+                          {comp.features && comp.features.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5">
+                              {comp.features.map((f: string, i: number) => (
+                                <span key={i} className="text-[9px] bg-white border border-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{f}</span>
+                              ))}
+                            </div>
                           )}
                         </div>
-                        {comp.heroCopy && (
-                          <p className="text-xs text-slate-600 leading-relaxed font-bold">
-                            <strong className="text-slate-800">H1 Copy Scraped:</strong> &ldquo;{comp.heroCopy}&rdquo;
-                          </p>
-                        )}
-                        {comp.positioningAngle && (
-                          <p className="text-xs text-slate-600 leading-relaxed font-bold">
-                            <strong className="text-slate-800">Positioning Angle:</strong> {comp.positioningAngle}
-                          </p>
-                        )}
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Strategic Positioning Gaps */}
+                  {positioningGaps.length > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
+                      <h4 className="text-sm font-black text-slate-900">Strategic Positioning Gaps &amp; Opportunities</h4>
+                      <p className="text-xs text-slate-500 font-semibold">AI-identified angles where your business can uniquely position itself. Based on live competitor data.</p>
+                      <div className="grid grid-cols-1 gap-4">
+                        {positioningGaps.map((gap: any) => (
+                          <div key={gap.id} className="border border-slate-200 rounded-2xl p-4 space-y-2.5 bg-slate-50/40">
+                            <div className="flex justify-between items-center">
+                              <span className="text-[10px] font-black text-[#7c3aed] bg-[#7c3aed]/10 px-2.5 py-1 rounded-full">
+                                Confidence: {Math.round((gap.confidence ?? 0.7) * 100)}%
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-bold">Opportunity Analysis</span>
+                            </div>
+                            <p className="text-xs text-slate-800 leading-relaxed">
+                              <strong className="text-slate-500 font-bold block mb-1 text-[10px] uppercase tracking-wide">Observed Positioning Gap</strong>
+                              {gap.gapDescription}
+                            </p>
+                            {gap.opportunity && (
+                              <div className="bg-white border border-slate-200 rounded-xl p-3 text-xs text-slate-700 leading-relaxed border-l-4 border-l-[#199874]">
+                                <strong className="text-slate-900 font-black block mb-0.5 text-[10px] uppercase tracking-wide">Actionable Opportunity</strong>
+                                {gap.opportunity}
+                              </div>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                    );
-                  })}
-                </div>
+                    </div>
+                  )}
+                </>
               ) : (
                 <div className="bg-white border border-dashed border-slate-300 rounded-3xl p-10 text-center shadow-sm">
                   <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-4">
                     <span className="text-slate-400 text-xl">👥</span>
                   </div>
                   <h4 className="font-black text-slate-700">No Competitors Found Yet</h4>
-                  <p className="text-xs text-slate-500 mt-2 max-w-xs mx-auto">The competitor discovery agent runs during the initial scan. Make sure your website URL was provided so the agent can analyze your niche.</p>
+                  <p className="text-xs text-slate-500 mt-2 max-w-xs mx-auto">The competitor discovery agent runs when you analyze a brand. Click <strong>↻ Refresh Analysis</strong> above to trigger a fresh discovery sweep.</p>
                 </div>
               )}
             </div>

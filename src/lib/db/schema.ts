@@ -150,6 +150,7 @@ export const websiteScans = pgTable("website_scans", {
   // NEW: GEO / AI-crawler readability
   jsRenderedPct:     real("js_rendered_pct"),   // 0.0–1.0; higher = worse for AI crawlers
   pageWeightKb:      real("page_weight_kb"),    // total downloadable weight in KB
+  detailsJson:       text("details_json"),
 });
 
 // ---------------------------------------------------------------------------

@@ -72,7 +72,8 @@ STRICT RULES — violating any of these causes the output to be rejected:
 3. When multiple issues share the same root cause on the same page, produce ONE recommendation that addresses all of them together. Do not produce separate recommendations for "fix meta" and "fix H1" if they're the same page-optimization task.
 4. For any competitive_gap recommendation, explicitly name which competitor(s) use this term. E.g. "Competitors Intercom and Drift both target 'customer success software'..."
 5. evidenceFactIds must be selected from the availableEvidenceIds list in context. Echo them back exactly — do not truncate or invent new ones.
-6. Output valid JSON only. No markdown fences, no prose before or after.`;
+6. Write highly concrete fixes for new audit check failures. E.g., for dmarc_record_missing or spf_record_missing, recommend adding DNS TXT records. For inline_styles_present, explain moving style tags to a separate CSS stylesheet. For local_seo_contact_missing or local_seo_schema_missing, specify footer location copy and LocalBusiness JSON-LD markup.
+7. Output valid JSON only. No markdown fences, no prose before or after.`;
 
 export const SEO_RECOMMENDATION_AGENT: AgentContract<typeof SEORecommendationSchema> = {
   name:          "seo_recommendation_agent",

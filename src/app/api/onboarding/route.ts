@@ -229,33 +229,38 @@ export async function POST(request: NextRequest): Promise<Response> {
 
   await logEvent(startupId, "signup_started");
 
-  // ── 2. Run ingestion agents in parallel — one failure never blocks others ─
+  // ── 2. Run Ingestion Agents ─────────────────────────────────────────────
   const domain = normalizedUrl
     ? (() => { try { return new URL(normalizedUrl).hostname; } catch { return null; } })()
     : null;
 
-  const [scanResult, compResult, seoResult] = await Promise.allSettled([
-    normalizedUrl ? scrapeWebsite(startupId, normalizedUrl) : Promise.resolve(null),
+  // Run scraper first so that website scan is fully committed to DB
+  let logoUrl: string | null = null;
+  if (normalizedUrl) {
+    try {
+      const scan = await scrapeWebsite(startupId, normalizedUrl);
+      if (scan) {
+        logoUrl = scan.logoUrl;
+        if (logoUrl) {
+          await db.update(startups)
+            .set({ logoUrl, updatedAt: new Date() })
+            .where(eq(startups.id, startupId))
+            .catch((err) => console.error("[onboarding] failed to update startup logoUrl:", err));
+        }
+      }
+    } catch (e) {
+      console.error("[onboarding] website-scraper threw:", e);
+    }
+  }
+
+  // Now run competitors and SEO ingestion in parallel since they depend on the scan data!
+  const [compResult, seoResult] = await Promise.allSettled([
     discoverCompetitors(startupId),
     domain ? runSeoIngestion(startupId, domain) : Promise.resolve(null),
   ]);
 
-  // Log any agent failures (non-throwing — already written to agent_failures table by each agent)
-  if (scanResult.status === "rejected") console.error("[onboarding] website-scraper threw:", scanResult.reason);
   if (compResult.status === "rejected") console.error("[onboarding] competitor-agent threw:", compResult.reason);
   if (seoResult.status  === "rejected") console.error("[onboarding] seo-agent threw:",  seoResult.reason);
-
-  // Update startup's logoUrl if scraper found it
-  let logoUrl: string | null = null;
-  if (scanResult.status === "fulfilled" && scanResult.value) {
-    logoUrl = scanResult.value.logoUrl;
-    if (logoUrl) {
-      await db.update(startups)
-        .set({ logoUrl, updatedAt: new Date() })
-        .where(eq(startups.id, startupId))
-        .catch((err) => console.error("[onboarding] failed to update startup logoUrl:", err));
-    }
-  }
 
   // ── 3. Analysis — SEO recommendations (may be empty on first run) ─────────
   await runSeoAnalysis(startupId).catch(() => null);

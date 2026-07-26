@@ -66,7 +66,19 @@ export type SeoIssueType =
   | "content_decay"
   | "competitive_gap_high_overlap"
   // New — GEO
-  | "rendered_content_llm_readability";
+  | "rendered_content_llm_readability"
+  // New checks matching the white-label PDF audit
+  | "dmarc_record_missing"
+  | "spf_record_missing"
+  | "social_pixel_missing"
+  | "social_card_missing"
+  | "local_seo_schema_missing"
+  | "local_seo_gbp_missing"
+  | "local_seo_contact_missing"
+  | "inline_styles_present"
+  | "deprecated_html_tags"
+  | "minification_missing"
+  | "compression_disabled";
 
 // ---------------------------------------------------------------------------
 // LOCAL_SEO_INDUSTRIES — conditional suppression gate
@@ -89,8 +101,9 @@ const LOCAL_SEO_INDUSTRIES = new Set([
 ]);
 
 const LOCAL_SEO_ISSUE_TYPES: Set<SeoIssueType> = new Set([
-  // These would be added here if we detect local-SEO checks
-  // Currently reserved for future local business checks
+  "local_seo_schema_missing",
+  "local_seo_gbp_missing",
+  "local_seo_contact_missing",
 ]);
 
 function isLocalBusiness(industry: string | null | undefined): boolean {
@@ -124,6 +137,18 @@ const STATIC_EFFORT: Record<SeoIssueType, number> = {
   rendered_content_llm_readability: 0.70,
   low_overall_seo_score:         0.50,
   api_audit_priority:            0.40,
+  // New checks
+  dmarc_record_missing:          0.15,
+  spf_record_missing:            0.15,
+  social_pixel_missing:          0.20,
+  social_card_missing:           0.15,
+  local_seo_schema_missing:      0.25,
+  local_seo_gbp_missing:         0.30,
+  local_seo_contact_missing:     0.10,
+  inline_styles_present:         0.35,
+  deprecated_html_tags:          0.20,
+  minification_missing:          0.15,
+  compression_disabled:          0.15,
 };
 
 // ---------------------------------------------------------------------------
@@ -215,6 +240,18 @@ function defaultTechnicalSeverity(issueType: SeoIssueType): number {
     broken_h1:                     0.6,
     keyword_gap_high_volume:       0.5,
     competitive_gap_high_overlap:  0.7,
+    // New checks
+    dmarc_record_missing:          0.6,
+    spf_record_missing:            0.6,
+    social_pixel_missing:          0.4,
+    social_card_missing:           0.4,
+    local_seo_schema_missing:      0.5,
+    local_seo_gbp_missing:         0.6,
+    local_seo_contact_missing:     0.5,
+    inline_styles_present:         0.4,
+    deprecated_html_tags:          0.3,
+    minification_missing:          0.3,
+    compression_disabled:          0.5,
   };
   return severityMap[issueType] ?? 0.5;
 }
@@ -722,8 +759,113 @@ async function detectIssues(
     }
   }
 
-  // Conditional suppression: remove local-SEO issues for non-local businesses
+  // --- ENHANCED DETECTORS ---
+  let details: any = {};
+  if (scan.detailsJson) {
+    try {
+      details = JSON.parse(scan.detailsJson);
+    } catch { /* ignore */ }
+  }
+
+  // SPF / DMARC DNS
+  if (details.spfRecord === "") {
+    issues.push({
+      type: "spf_record_missing",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: "SPF DNS record is missing, risking email spoofing and delivery failures.", url: scan.url, ...auditCtx }
+    });
+  }
+  if (details.dmarcRecord === "") {
+    issues.push({
+      type: "dmarc_record_missing",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: "DMARC DNS record is missing, leaving your domain vulnerable to email spoofing.", url: scan.url, ...auditCtx }
+    });
+  }
+
+  // Social Pixel / Cards
+  if (details.hasFbPixel === false) {
+    issues.push({
+      type: "social_pixel_missing",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: "Facebook Pixel is missing. You cannot track conversions or run retargeting campaigns.", url: scan.url, ...auditCtx }
+    });
+  }
+  if (!details.twitterCards || Object.keys(details.twitterCards).length < 2) {
+    issues.push({
+      type: "social_card_missing",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: "Twitter card metadata tags are missing or incomplete. Link shares on X will lack visual cards.", url: scan.url, ...auditCtx }
+    });
+  }
+
+  // Local SEO
   const localBiz = isLocalBusiness(industry);
+  if (localBiz) {
+    if (!scan.hasSchemaJsonld) {
+      issues.push({
+        type: "local_seo_schema_missing",
+        evidenceFactIds: [scan.id],
+        pageUrl: scan.url,
+        context: { issue: "Local Business JSON-LD schema markup is missing for your local startup.", url: scan.url, ...auditCtx }
+      });
+    }
+    const phoneInText = scan.heroCopy && /(\+?\d{1,4}[-.\s]??\d{1,3}[-.\s]??\d{3,4}[-.\s]??\d{3,4})/g.test(scan.heroCopy);
+    if (!phoneInText) {
+      issues.push({
+        type: "local_seo_contact_missing",
+        evidenceFactIds: [scan.id],
+        pageUrl: scan.url,
+        context: { issue: "Phone number or physical address not clearly displayed in your landing page content.", url: scan.url, ...auditCtx }
+      });
+    }
+    issues.push({
+      type: "local_seo_gbp_missing",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: "Google Business Profile mapping is missing or unverified.", url: scan.url, ...auditCtx }
+    });
+  }
+
+  // Performance/HTML Styles
+  if (details.inlineStylesCount > 15) {
+    issues.push({
+      type: "inline_styles_present",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: `Exceeded inline styles count: found ${details.inlineStylesCount} style attributes. Move them to external CSS.`, url: scan.url, ...auditCtx }
+    });
+  }
+  if (details.deprecatedTagsCount > 0) {
+    issues.push({
+      type: "deprecated_html_tags",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: `Found ${details.deprecatedTagsCount} deprecated HTML tags (e.g. <center>, <font>). Replace them with modern CSS.`, url: scan.url, ...auditCtx }
+    });
+  }
+  if (details.isMinified === false) {
+    issues.push({
+      type: "minification_missing",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: "JavaScript or CSS files are unminified, increasing total asset transfer sizes.", url: scan.url, ...auditCtx }
+    });
+  }
+  if (details.isCompressed === false) {
+    issues.push({
+      type: "compression_disabled",
+      evidenceFactIds: [scan.id],
+      pageUrl: scan.url,
+      context: { issue: "HTTP server compression (Gzip/Brotli) is not active for page assets.", url: scan.url, ...auditCtx }
+    });
+  }
+
+  // Conditional suppression: remove local-SEO issues for non-local businesses
   return issues.filter((issue) => {
     if (!localBiz && LOCAL_SEO_ISSUE_TYPES.has(issue.type)) return false;
     return true;

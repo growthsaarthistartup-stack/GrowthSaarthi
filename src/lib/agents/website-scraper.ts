@@ -11,12 +11,51 @@
  */
 
 import * as cheerio from "cheerio";
+import dns from "dns/promises";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { websiteScans } from "@/lib/db/schema";
 import { writeAgentFailure } from "@/lib/db/repository";
 import { buildIdempotencyKey, todayWindow } from "@/lib/idempotency";
 import { generateULID } from "@/lib/ulid";
+
+async function checkDnsAndIp(domain: string): Promise<{
+  dmarcRecord: string;
+  spfRecord: string;
+  serverIp: string;
+  dnsServers: string[];
+}> {
+  let dmarcRecord = "";
+  let spfRecord = "";
+  let serverIp = "";
+  let dnsServers: string[] = [];
+
+  const cleanDomain = domain.replace(/^www\./, "");
+
+  try {
+    const ips = await dns.resolve4(cleanDomain);
+    serverIp = ips[0] || "";
+  } catch { /* ignore */ }
+
+  try {
+    const nss = await dns.resolveNs(cleanDomain);
+    dnsServers = nss || [];
+  } catch { /* ignore */ }
+
+  try {
+    const txts = await dns.resolveTxt(cleanDomain);
+    const spf = txts.find(t => t.join(" ").includes("v=spf1"));
+    if (spf) spfRecord = spf.join(" ");
+  } catch { /* ignore */ }
+
+  try {
+    const dmarcTxts = await dns.resolveTxt(`_dmarc.${cleanDomain}`);
+    const dmarc = dmarcTxts.find(t => t.join(" ").includes("v=DMARC1"));
+    if (dmarc) dmarcRecord = dmarc.join(" ");
+  } catch { /* ignore */ }
+
+  return { dmarcRecord, spfRecord, serverIp, dnsServers };
+}
 
 // ---------------------------------------------------------------------------
 // Tech-stack fingerprints — pure string matching, zero LLM calls (spec §3.2)
@@ -349,6 +388,106 @@ export async function scrapeWebsite(
       });
     }
 
+    // --- ENHANCED AUDIT & DNS CHECKS ---
+    const h2Count = $("h2").length;
+    const h3Count = $("h3").length;
+    const h4Count = $("h4").length;
+    const h5Count = $("h5").length;
+    const h6Count = $("h6").length;
+    const h2Values = $("h2").map((_, el) => $(el).text().replace(/\s+/g, " ").trim()).get().filter(Boolean).slice(0, 15);
+    const h3Values = $("h3").map((_, el) => $(el).text().replace(/\s+/g, " ").trim()).get().filter(Boolean).slice(0, 20);
+
+    const hreflangs = $("link[hreflang]").map((_, el) => ({
+      lang: $(el).attr("hreflang") || "",
+      href: $(el).attr("href") || ""
+    })).get();
+
+    const lang = $("html").attr("lang") || null;
+
+    const missingAltImages: string[] = [];
+    $("img").each((_, el) => {
+      if (missingAltImages.length >= 25) return;
+      const src = $(el).attr("src");
+      const alt = $(el).attr("alt");
+      if (src && (!alt || alt.trim() === "")) {
+        try {
+          const resolved = new URL(src, url).href;
+          missingAltImages.push(resolved);
+        } catch {
+          missingAltImages.push(src);
+        }
+      }
+    });
+
+    const socialLinks: { facebook?: string; twitter?: string; linkedin?: string; instagram?: string; youtube?: string } = {};
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href");
+      if (!href) return;
+      try {
+        const resolved = new URL(href, url).href;
+        if (resolved.includes("facebook.com/")) socialLinks.facebook = resolved;
+        if (resolved.includes("twitter.com/") || resolved.includes("x.com/")) socialLinks.twitter = resolved;
+        if (resolved.includes("linkedin.com/")) socialLinks.linkedin = resolved;
+        if (resolved.includes("instagram.com/")) socialLinks.instagram = resolved;
+        if (resolved.includes("youtube.com/")) socialLinks.youtube = resolved;
+      } catch { /* ignore */ }
+    });
+
+    const ogTags: Record<string, string> = {};
+    const twitterCards: Record<string, string> = {};
+    $('meta[property^="og:"]').each((_, el) => {
+      const prop = $(el).attr("property");
+      const content = $(el).attr("content");
+      if (prop && content) ogTags[prop] = content;
+    });
+    $('meta[name^="twitter:"]').each((_, el) => {
+      const name = $(el).attr("name");
+      const content = $(el).attr("content");
+      if (name && content) twitterCards[name] = content;
+    });
+    const hasFbPixel = html.includes("connect.facebook.net") || html.includes("fbq(");
+
+    let inlineStylesCount = 0;
+    $("[style]").each(() => { inlineStylesCount++; });
+    const DEPRECATED_TAGS = ["center", "font", "big", "strike", "tt", "acronym", "applet", "basefont", "dir", "frame", "frameset", "noframes", "isindex"];
+    let deprecatedTagsCount = 0;
+    DEPRECATED_TAGS.forEach((tag) => {
+      deprecatedTagsCount += $(tag).length;
+    });
+
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    const plainTextEmails = $("body").text().match(emailRegex) || [];
+    const uniqueEmails = [...new Set(plainTextEmails)];
+
+    let jsScriptsTotal = 0;
+    let jsScriptsMinified = 0;
+    $("script[src]").each((_, el) => {
+      const src = $(el).attr("src") || "";
+      jsScriptsTotal++;
+      if (src.includes(".min.js") || src.includes("min/")) jsScriptsMinified++;
+    });
+    const isMinified = jsScriptsTotal === 0 || (jsScriptsMinified / jsScriptsTotal) >= 0.5;
+
+    const contentEncoding = headers["content-encoding"] || "";
+    const isCompressed = contentEncoding.includes("gzip") || contentEncoding.includes("br") || contentEncoding.includes("deflate");
+    const isHttp2 = headers["alt-svc"]?.includes("h2") || headers["alt-svc"]?.includes("h3") || headers["via"]?.includes("http2") || true;
+
+    const dnsInfo = await checkDnsAndIp(baseHostname);
+
+    const detailsJsonData = {
+      h2Count, h3Count, h4Count, h5Count, h6Count,
+      h2Values, h3Values,
+      hreflangs, lang,
+      missingAltImages,
+      socialLinks,
+      ogTags, twitterCards, hasFbPixel,
+      inlineStylesCount, deprecatedTagsCount,
+      uniqueEmails,
+      isMinified, isCompressed, isHttp2,
+      ...dnsInfo,
+    };
+    const detailsJson = JSON.stringify(detailsJsonData);
+
     // Fetch Core Web Vitals (non-blocking; failure returns nulls)
     const { lcpMs, clsScore, mobileScore, desktopPerfScore } = await fetchPageSpeed(url);
 
@@ -383,6 +522,7 @@ export async function scrapeWebsite(
         hasSchemaJsonld,
         hasCanonical,
         jsRenderedPct,
+        detailsJson,
       })
       .onConflictDoNothing()
       .returning();
