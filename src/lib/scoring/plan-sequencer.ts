@@ -61,7 +61,10 @@ export function build30DayPlanPure(
   const plan: ThirtyDayPlan = { 1: [], 2: [], 3: [], 4: [] };
 
   for (const week of [1, 2, 3, 4] as const) {
-    const prevWeekCategories = new Set(plan[week === 1 ? 1 : ((week - 1) as 1 | 2 | 3 | 4)].map((r) => r.category));
+    // BUG-2 FIX: week=1 has no prior week — use empty array, not plan[1] (which is currently being built)
+    const prevWeekItems = week === 1 ? [] : plan[(week - 1) as 2 | 3 | 4];
+    const prevWeekCategories = new Set(prevWeekItems.map((r) => r.category));
+
 
     for (const rec of ranked) {
       if (plan[week].length >= 3) break;

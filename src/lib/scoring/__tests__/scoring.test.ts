@@ -527,3 +527,67 @@ describe("ExecutionGate constants", () => {
     expect(AUTO_SAFE.has("monitoring_report" as never)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// medianSimilarity + computeDynamicThreshold (competitor-agent Phase 2f)
+// ---------------------------------------------------------------------------
+
+import {
+  medianSimilarity,
+  computeDynamicThreshold,
+} from "@/lib/agents/competitor-agent";
+
+describe("medianSimilarity()", () => {
+  it("returns 0.72 for empty array (fallback)", () => {
+    expect(medianSimilarity([])).toBe(0.72);
+  });
+
+  it("returns the single value for a 1-element array", () => {
+    expect(medianSimilarity([0.65])).toBe(0.65);
+  });
+
+  it("returns middle element for odd-length array", () => {
+    expect(medianSimilarity([0.5, 0.7, 0.9])).toBe(0.7);
+  });
+
+  it("returns average of two middle elements for even-length array", () => {
+    expect(medianSimilarity([0.5, 0.6, 0.8, 0.9])).toBeCloseTo(0.7, 5);
+  });
+
+  it("is order-independent (unsorted input)", () => {
+    expect(medianSimilarity([0.9, 0.5, 0.7])).toBe(0.7);
+  });
+
+  it("does not mutate the input array", () => {
+    const arr = [0.9, 0.5, 0.7];
+    medianSimilarity(arr);
+    expect(arr).toEqual([0.9, 0.5, 0.7]);
+  });
+});
+
+describe("computeDynamicThreshold()", () => {
+  it("floors at 0.6 when median is below 0.6", () => {
+    // Niche vertical: all similarities are low
+    expect(computeDynamicThreshold([0.3, 0.4, 0.5])).toBe(0.6);
+  });
+
+  it("uses median when above 0.6", () => {
+    // Competitive SaaS space: high similarities
+    const scores = [0.72, 0.74, 0.78, 0.80, 0.82, 0.85];
+    expect(computeDynamicThreshold(scores)).toBeCloseTo(0.79, 2);
+  });
+
+  it("returns 0.6 floor for empty array (fallback median = 0.72 > 0.6)", () => {
+    // Empty → medianSimilarity returns 0.72 → threshold = max(0.6, 0.72) = 0.72
+    expect(computeDynamicThreshold([])).toBe(0.72);
+  });
+
+  it("returns 0.6 for single below-floor score", () => {
+    expect(computeDynamicThreshold([0.4])).toBe(0.6);
+  });
+
+  it("returns exact median for single above-floor score", () => {
+    expect(computeDynamicThreshold([0.85])).toBe(0.85);
+  });
+});
+

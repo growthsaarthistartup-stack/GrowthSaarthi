@@ -94,6 +94,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     websiteUrl?:  string;
     stage?:       string;
     primaryGoal?: string;
+    country?:     string;
+    industry?:    string;
   };
 
   try {
@@ -102,7 +104,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { startupName, websiteUrl, stage = "MVP", primaryGoal = "acquisition" } = body;
+  const { startupName, websiteUrl, stage = "MVP", primaryGoal = "acquisition", country, industry } = body;
 
   if (!startupName?.trim()) {
     return Response.json({ error: "startupName is required" }, { status: 400 });
@@ -221,6 +223,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     url:         normalizedUrl,
     stage:       toStage(stage),
     primaryGoal: toGoal(primaryGoal),
+    country:     country?.trim() || null,
+    industry:    industry?.trim() || null,
   }).onConflictDoNothing();
 
   await logEvent(startupId, "signup_started");

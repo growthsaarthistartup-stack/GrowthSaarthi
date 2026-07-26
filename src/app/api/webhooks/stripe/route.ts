@@ -19,9 +19,10 @@ import type { NextRequest } from "next/server";
 import Stripe from "stripe";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { stripeEvents, startups } from "@/lib/db/schema";
+import { stripeEvents, startups, alerts } from "@/lib/db/schema";
 import { writeAgentFailure } from "@/lib/db/repository";
 import { generateULID } from "@/lib/ulid";
+import { buildIdempotencyKey, todayWindow } from "@/lib/idempotency";
 
 // ---------------------------------------------------------------------------
 // Critical events (spec §3.5)
@@ -139,12 +140,44 @@ export async function POST(request: NextRequest): Promise<Response> {
       })
       .onConflictDoNothing();                           // Stripe retries → no-op
 
-    if (severity === "HIGH") {
+    if (severity === "HIGH" && startupId) {
       console.error(
         `[stripe-webhook] HIGH severity event ${event.type} for customer ${customerId}` +
           (startupId ? ` (startup: ${startupId})` : " — startup not resolved"),
       );
-      // Phase 4: trigger_immediate_alert(startupId) here
+
+      // Write real-time alert — bypasses z-score batch job (spec §1d)
+      const alertKey = buildIdempotencyKey(
+        "StripeAlert", startupId, event.type, todayWindow(),
+      );
+      const amount = typeof obj.amount === "number"
+        ? obj.amount / 100
+        : (typeof obj.amount_paid === "number" ? obj.amount_paid / 100 : 0);
+
+      const message = event.type === "invoice.payment_failed"
+        ? `Payment failed: $${amount.toFixed(2)} invoice for customer ${customerId ?? "unknown"}`
+        : event.type === "customer.subscription.deleted"
+        ? `Subscription cancelled for customer ${customerId ?? "unknown"}. MRR impact: $${amount.toFixed(2)}/mo`
+        : `Stripe HIGH severity event: ${event.type}`;
+
+      await db
+        .insert(alerts)
+        .values({
+          id:             generateULID(),
+          startupId,
+          idempotencyKey: alertKey,
+          metricType:     "revenue",
+          zScore:         -3.5,          // synthetic z-score — real-time event, not batch-computed
+          severity:       "critical",
+          channel:        "both",
+          message,
+          source:         "stripe_realtime",
+        })
+        .onConflictDoNothing();           // idempotent — Stripe may retry
+    } else if (severity === "HIGH") {
+      console.error(
+        `[stripe-webhook] HIGH severity event ${event.type} — startup not resolved for customer ${customerId}`,
+      );
     }
   } catch (err) {
     // Write failure fact if we have any startup context, otherwise just log

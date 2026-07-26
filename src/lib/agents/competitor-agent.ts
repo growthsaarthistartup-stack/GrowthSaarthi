@@ -17,7 +17,7 @@ import * as cheerio from "cheerio";
 import { eq, and } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
-import { competitors, startups } from "@/lib/db/schema";
+import { competitors, startups, positioningGaps } from "@/lib/db/schema";
 import { writeAgentFailure } from "@/lib/db/repository";
 import { buildIdempotencyKey, isoWeekWindow } from "@/lib/idempotency";
 import { generateULID } from "@/lib/ulid";
@@ -25,10 +25,32 @@ import { runAgent, type AgentContract } from "@/lib/agent-runner";
 import { MODEL_ROUTES } from "@/lib/models";
 
 // ---------------------------------------------------------------------------
-// Threshold (spec §3.4) — hardcoded; calibration pipeline is a v2 script
+// Dynamic similarity threshold (Phase 2f)
+// Fixed 0.72 replaced by: median of candidate similarities, floored at 0.6.
+// This ensures niche verticals with lower absolute similarity still surface
+// real competitors rather than returning zero matches.
 // ---------------------------------------------------------------------------
 
-const COMPETITOR_SIMILARITY_THRESHOLD = 0.72;
+/** Compute median of a number array (mutates a copy). */
+export function medianSimilarity(scores: number[]): number {
+  if (scores.length === 0) return 0.72; // fallback if no candidates
+  const sorted = [...scores].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Dynamic threshold: median similarity floored at 0.6.
+ * For a typical SaaS search returning 10 candidates with similarities
+ * like [0.45, 0.51, 0.55, 0.72, 0.74, 0.78, 0.80, 0.82, 0.85, 0.87]
+ * the median would be ~0.76 so we keep the top half. For niche verticals
+ * where all similarities are ~0.45-0.60, threshold drops to 0.6 floor.
+ */
+export function computeDynamicThreshold(scores: number[]): number {
+  return Math.max(0.6, medianSimilarity(scores));
+}
 
 // ---------------------------------------------------------------------------
 // Local embeddings — @xenova/transformers, no API cost
@@ -193,8 +215,11 @@ async function scrapeCompetitorSite(
 // ---------------------------------------------------------------------------
 
 const PositioningGapSchema = z.object({
-  gaps:          z.array(z.string()),
-  opportunities: z.array(z.string()),
+  gaps: z.array(z.object({
+    gapDescription: z.string(),
+    opportunity:    z.string().optional(),
+    confidence:     z.number().min(0).max(1).optional(),
+  })),
 });
 
 const POSITIONING_GAP_AGENT: AgentContract<typeof PositioningGapSchema> = {
@@ -239,25 +264,52 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
       return db.select().from(competitors).where(eq(competitors.startupId, startupId));
     }
 
-    // SerpApi search
-    const query = `best ${startup.industry ?? "SaaS"} tools site:g2.com OR site:producthunt.com`;
-    const serpResults = await searchSerpApi(query);
-    const candidates  = extractCandidates(serpResults).slice(0, 10); // cap to 10 candidates
+    // ALG-2 FIX: single "best {industry} tools" query missed B2C, marketplaces, and non-SaaS.
+    // Now runs 3 complementary queries in parallel and deduplicates candidates.
+    const industryLabel = startup.industry ?? "startup";
+    const queries = [
+      `best ${industryLabel} tools site:g2.com OR site:producthunt.com`,
+      `${startup.name} alternative`,
+      `${industryLabel} companies`,
+    ];
+    const serpResultSets = await Promise.allSettled(queries.map(q => searchSerpApi(q)));
+    const allSerpResults = serpResultSets
+      .filter((r): r is PromiseFulfilledResult<SerpResult[]> => r.status === "fulfilled")
+      .flatMap(r => r.value);
+    // Deduplicate by URL before candidate extraction
+    const seenLinks = new Set<string>();
+    const dedupedResults = allSerpResults.filter(r => {
+      if (!r.link || seenLinks.has(r.link)) return false;
+      seenLinks.add(r.link);
+      return true;
+    });
+    const candidates  = extractCandidates(dedupedResults).slice(0, 15); // raised cap for multi-query
+
 
     // Embed the startup's own value proposition
     const startupText = [startup.name, startup.industry].filter(Boolean).join(" — ");
     const startupVec  = await embed(startupText);
 
-    const confirmedCompetitors: CompetitorRow[] = [];
+    // Compute all candidate similarities first (needed for dynamic threshold)
+    const candidateSims: Array<{ candidate: Candidate; site: NonNullable<Awaited<ReturnType<typeof scrapeCompetitorSite>>>; similarity: number }> = [];
 
     for (const candidate of candidates) {
       const site = await scrapeCompetitorSite(candidate.url);
       if (!site || !site.heroCopy) continue;
-
       const candidateVec = await embed(site.heroCopy);
       const similarity   = cosineSimilarity(startupVec, candidateVec);
+      candidateSims.push({ candidate, site, similarity });
+    }
 
-      if (similarity < COMPETITOR_SIMILARITY_THRESHOLD) continue;
+    // Compute dynamic threshold from all candidates in this run (Phase 2f)
+    const allScores = candidateSims.map((c) => c.similarity);
+    const threshold = computeDynamicThreshold(allScores);
+    console.info(`[competitor-agent] Dynamic threshold: ${threshold.toFixed(3)} (median of ${allScores.length} candidates)`);
+
+    const confirmedCompetitors: CompetitorRow[] = [];
+
+    for (const { candidate, site, similarity } of candidateSims) {
+      if (similarity < threshold) continue;
 
       // Confirmed competitor — write fact
       const [comp] = await db
@@ -282,7 +334,7 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
     // Positioning-gap analysis through runAgent() if we found any competitors
     if (confirmedCompetitors.length > 0) {
       try {
-        await runAgent(POSITIONING_GAP_AGENT, {
+        const gapResult = await runAgent(POSITIONING_GAP_AGENT, {
           startupName:      startup.name,
           startupIndustry:  startup.industry,
           startupHeroCopy:  startupText,
@@ -292,7 +344,26 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
             positioning: c.positioningAngle,
           })),
         });
-        // Gap result is returned but we don't store it as a separate entity yet (Phase 3)
+
+        // Phase 1f: persist gaps to positioning_gaps table instead of discarding
+        if (gapResult?.gaps && gapResult.gaps.length > 0) {
+          await Promise.allSettled(
+            gapResult.gaps.map((gap, idx) =>
+              db
+                .insert(positioningGaps)
+                .values({
+                  id:             generateULID(),
+                  startupId,
+                  competitorId:   confirmedCompetitors[Math.min(idx, confirmedCompetitors.length - 1)]?.id,
+                  idempotencyKey: weekKey + ":gap:" + idx,
+                  gapDescription: gap.gapDescription,
+                  opportunity:    gap.opportunity ?? null,
+                  confidence:     gap.confidence ?? 0.7,
+                })
+                .onConflictDoNothing()
+            ),
+          );
+        }
       } catch (gapErr) {
         await writeAgentFailure(startupId, "positioning_gap_agent", gapErr);
       }

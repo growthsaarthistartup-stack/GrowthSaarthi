@@ -23,6 +23,7 @@ import {
   competitors,
   marketSignals,
   customers,
+  geoScores,
 } from "@/lib/db/schema";
 
 // ---------------------------------------------------------------------------
@@ -140,10 +141,18 @@ export interface HealthScore {
   technical:  number; // 0–100
   validation: number; // 0–100
   growth:     number; // 0–100
+  /**
+   * GEO (Generative Engine Optimization) score — 0–100.
+   * Displayed SEPARATELY from traditional SEO health on the dashboard.
+   * Factors: llms_txt presence, JSON-LD schema, JS-render % for AI crawlers.
+   * NOT blended into the overall score to preserve signal clarity.
+   */
+  geoScore?:  number; // 0–100 | undefined (absent if no GEO data yet)
   explainability: {
     technicalBreakdown:  Record<string, number>;
     validationBreakdown: Record<string, number | null | undefined>;
     growthBreakdown:     Record<string, number | null | undefined>;
+    geoBreakdown?:       Record<string, number>;
   };
 }
 
@@ -250,21 +259,38 @@ export async function calculateHealthScore(
   // spec calls weighted_avg(growth) — equal weights across non-null keys
   const growthScore = weightedAvg(growth);
 
-  // ── Overall ──────────────────────────────────────────────────────────────
+  // ── GEO Score (separate from health score — not blended in) ─────────────
+  const [latestGeo] = await db
+    .select()
+    .from(geoScores)
+    .where(eq(geoScores.startupId, startupId))
+    .orderBy(desc(geoScores.createdAt))
+    .limit(1);
+
+  // ── Overall (traditional SEO health — geo NOT included in blend) ─────────
   const overall =
     (technicalScore  * stageWeights.technical +
      validationScore * stageWeights.validation +
      growthScore     * stageWeights.growth) * 100;
+
+  const geoBreakdown = latestGeo ? {
+    llmsTxtScore:       latestGeo.llmsTxtScore,
+    schemaJsonldScore:  latestGeo.schemaJsonldScore,
+    jsRenderScore:      latestGeo.jsRenderScore,
+    aiReadabilityScore: latestGeo.aiReadabilityScore,
+  } : undefined;
 
   return {
     overall:    Math.round(overall * 10) / 10,
     technical:  Math.round(technicalScore  * 1000) / 10,
     validation: Math.round(validationScore * 1000) / 10,
     growth:     Math.round(growthScore     * 1000) / 10,
+    geoScore:   latestGeo ? latestGeo.overallGeoScore : undefined,
     explainability: {
       technicalBreakdown:  technical,
       validationBreakdown: validation,
       growthBreakdown:     growth,
+      geoBreakdown,
     },
   };
 }

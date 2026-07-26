@@ -18,6 +18,13 @@ import {
   pgEnum,
 } from "drizzle-orm/pg-core";
 
+// crypto.subtle.digest is available in Node 18+ / Edge runtime
+// We use it for content-hash computation in the SEO audit cache.
+import { createHash } from "crypto";
+export function sha256(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
@@ -33,7 +40,10 @@ export const integrationTypeEnum = pgEnum("integration_type", ["ga4", "gsc", "st
 export const connectionHealthEnum = pgEnum("connection_health", ["ok", "expired", "error"]);
 export const feedbackActionEnum = pgEnum("feedback_action", ["approved", "edited", "ignored"]);
 export const brandVoiceSourceEnum = pgEnum("brand_voice_source", ["onboarding_questionnaire", "existing_content_sample"]);
-export const keywordTypeEnum = pgEnum("keyword_type", ["owned", "gap", "opportunity"]);
+// competitive_gap: term found in 2+ competitors but absent from startup's keywords
+export const keywordTypeEnum = pgEnum("keyword_type", ["owned", "gap", "opportunity", "competitive_gap"]);
+export const keywordConfidenceEnum = pgEnum("keyword_confidence", ["gsc", "serpapi_rank", "competitor_inferred"]);
+export const seoMaturityEnum = pgEnum("seo_maturity", ["unknown", "cold_start", "emerging", "established"]);
 export const telemetryEventEnum = pgEnum("telemetry_event", [
   "signup_started",
   "report_delivered",
@@ -42,6 +52,7 @@ export const telemetryEventEnum = pgEnum("telemetry_event", [
   "plan_item_ignored",
   "briefing_viewed",
   "outcome_recorded",
+  "content_decay_skipped_no_baseline",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -74,8 +85,8 @@ export const sessions = pgTable("sessions", {
 // ---------------------------------------------------------------------------
 
 export const startups = pgTable("startups", {
-  id:           text("id").primaryKey(),                    // ULID
-  userId:       text("user_id").references(() => users.id), // Link to the user who created it
+  id:           text("id").primaryKey(),
+  userId:       text("user_id").references(() => users.id),
   name:         text("name").notNull(),
   url:          text("url"),
   logoUrl:      text("logo_url"),
@@ -83,6 +94,8 @@ export const startups = pgTable("startups", {
   stage:        startupStageEnum("stage").notNull().default("mvp"),
   country:      text("country"),
   primaryGoal:  primaryGoalEnum("primary_goal").notNull().default("get_more_customers"),
+  /** Derived from keyword ingestion: cold_start = no real ranking footprint */
+  seoMaturity:  seoMaturityEnum("seo_maturity").notNull().default("unknown"),
   createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -109,15 +122,34 @@ export const websiteScans = pgTable("website_scans", {
   wordCount:         integer("word_count"),
   pageCount:         integer("page_count"),
 
+  // Core Web Vitals (PageSpeed Insights)
   lcpMs:             real("lcp_ms"),
   clsScore:          real("cls_score"),
   fidMs:             real("fid_ms"),
   mobileScore:       real("mobile_score"),
+  desktopPerfScore:  real("desktop_perf_score"),  // NEW: for mobile/desktop gap detection
 
   brokenLinks:       text("broken_links").array(),
   hasSitemap:        boolean("has_sitemap"),
   robotsPolicy:      text("robots_policy"),
   screenshotPath:    text("screenshot_path"),
+
+  // NEW: Orphan-page detection — same-domain <a href> targets scraped from cheerio
+  internalLinks:     text("internal_links").array(),
+
+  // NEW: Image accessibility
+  imageTotal:        integer("image_total").default(0),
+  imageAltMissing:   integer("image_alt_missing").default(0),
+
+  // NEW: Technical signals
+  hasHttpsRedirect:  boolean("has_https_redirect"),
+  analyticsDetected: boolean("analytics_detected").default(false),
+  hasSchemaJsonld:   boolean("has_schema_jsonld").default(false),
+  hasCanonical:      boolean("has_canonical").default(false),
+
+  // NEW: GEO / AI-crawler readability
+  jsRenderedPct:     real("js_rendered_pct"),   // 0.0–1.0; higher = worse for AI crawlers
+  pageWeightKb:      real("page_weight_kb"),    // total downloadable weight in KB
 });
 
 // ---------------------------------------------------------------------------
@@ -168,8 +200,16 @@ export const keywords = pgTable("keywords", {
   searchVolume:          integer("search_volume"),
   keywordDifficulty:     real("keyword_difficulty"),
   startupRanking:        integer("startup_ranking"),
-  competitorRankingsJson: text("competitor_rankings_json"), // JSON string: { [competitorId]: rank }
+  competitorRankingsJson: text("competitor_rankings_json"),
   type:                  keywordTypeEnum("type").notNull().default("gap"),
+
+  // NEW: data-source confidence for downstream scoring
+  confidence:            keywordConfidenceEnum("confidence").notNull().default("serpapi_rank"),
+  // NEW: # competitors using this term (for competitive_gap type)
+  competitorCount:       integer("competitor_count").notNull().default(0),
+  // NEW: prior week's ranking snapshot (for content_decay detection)
+  priorRanking:          integer("prior_ranking"),
+  priorRankingWeek:      text("prior_ranking_week"),  // ISO week e.g. '2026-W28'
 });
 
 // ---------------------------------------------------------------------------
@@ -382,18 +422,85 @@ export const outcomeRecords = pgTable("outcome_records", {
 export const alertSeverityEnum = pgEnum("alert_severity", ["critical", "warning", "info"]);
 export const alertChannelEnum  = pgEnum("alert_channel",  ["email", "toast", "both"]);
 
-export const alerts = pgTable("alerts", {
-  id:           text("id").primaryKey(),             // ULID
-  startupId:    text("startup_id").notNull().references(() => startups.id),
-  idempotencyKey: text("idempotency_key").unique(),  // prevents duplicate alerts same day
-  createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+// ---------------------------------------------------------------------------
+// 18. SeoAudit — cached SEOScoreAPI results (rate-limit-aware, 7-day cache)
+// ---------------------------------------------------------------------------
 
-  metricType:   text("metric_type").notNull(),       // "sessions" | "conversions" | "mrr"
-  zScore:       real("z_score").notNull(),           // computed z-score (negative = drop)
-  severity:     alertSeverityEnum("severity").notNull().default("warning"),
-  channel:      alertChannelEnum("channel").notNull().default("both"),
-  message:      text("message").notNull(),
-  emailSentAt:  timestamp("email_sent_at", { withTimezone: true }),
-  acknowledged: boolean("acknowledged").notNull().default(false),
+export const seoAudits = pgTable("seo_audits", {
+  id:             text("id").primaryKey(),
+  startupId:      text("startup_id").notNull().references(() => startups.id),
+  idempotencyKey: text("idempotency_key").unique(),
+  createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+
+  url:            text("url").notNull(),
+  /** sha256(title + metaDescription + h1 + wordCount) — detects content changes */
+  contentHash:    text("content_hash").notNull(),
+  score:          real("score").notNull().default(0),
+  grade:          text("grade").notNull().default("N/A"),
+  /** Full normalized SeoScoreAuditResult stored as JSON string */
+  rawJson:        text("raw_json").notNull(),
 });
 
+// ---------------------------------------------------------------------------
+// 19. SeoAuditCallCounter — daily rate-limit tracker (2/day on free plan)
+// ---------------------------------------------------------------------------
+
+export const seoAuditCallCounter = pgTable("seo_audit_call_counter", {
+  id:        text("id").primaryKey(),
+  callDate:  text("call_date").notNull().unique(),  // YYYY-MM-DD
+  callCount: integer("call_count").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// 20. GeoScore — GEO (Generative Engine Optimization) score, displayed
+//     separately from traditional SEO health on the dashboard
+// ---------------------------------------------------------------------------
+
+export const geoScores = pgTable("geo_scores", {
+  id:                 text("id").primaryKey(),
+  startupId:          text("startup_id").notNull().references(() => startups.id),
+  scanId:             text("scan_id").references(() => websiteScans.id),
+  idempotencyKey:     text("idempotency_key").unique(),
+  createdAt:          timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+
+  overallGeoScore:    real("overall_geo_score").notNull().default(0),  // 0-100
+  llmsTxtScore:       real("llms_txt_score").notNull().default(0),
+  schemaJsonldScore:  real("schema_jsonld_score").notNull().default(0),
+  jsRenderScore:      real("js_render_score").notNull().default(0),
+  aiReadabilityScore: real("ai_readability_score").notNull().default(0),
+});
+
+export const alerts = pgTable("alerts", {
+  id:              text("id").primaryKey(),
+  startupId:       text("startup_id").notNull().references(() => startups.id),
+  idempotencyKey:  text("idempotency_key").unique(),
+  createdAt:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+
+  metricType:      text("metric_type").notNull(),
+  zScore:          real("z_score").notNull(),
+  severity:        alertSeverityEnum("severity").notNull().default("warning"),
+  channel:         alertChannelEnum("channel").notNull().default("both"),
+  message:         text("message").notNull(),
+  emailSentAt:     timestamp("email_sent_at", { withTimezone: true }),
+  acknowledged:    boolean("acknowledged").notNull().default(false),
+  /** 'zscore_batch' | 'stripe_realtime' — stripe alerts bypass the daily batch job */
+  source:          text("source").notNull().default("zscore_batch"),
+  acknowledgedAt:  timestamp("acknowledged_at", { withTimezone: true }),
+});
+
+// ---------------------------------------------------------------------------
+// 21. PositioningGap — persisted output of POSITIONING_GAP_AGENT
+// ---------------------------------------------------------------------------
+
+export const positioningGaps = pgTable("positioning_gaps", {
+  id:             text("id").primaryKey(),
+  startupId:      text("startup_id").notNull().references(() => startups.id),
+  competitorId:   text("competitor_id").references(() => competitors.id),
+  idempotencyKey: text("idempotency_key").unique(),
+  createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+
+  gapDescription: text("gap_description").notNull(),
+  opportunity:    text("opportunity"),
+  confidence:     real("confidence").default(0.7),
+});

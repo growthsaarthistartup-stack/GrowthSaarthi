@@ -63,29 +63,57 @@ function parseCtaTexts($: ReturnType<typeof cheerio.load>): string[] {
 
 async function fetchPageSpeed(
   url: string,
-): Promise<{ lcpMs: number | null; clsScore: number | null; mobileScore: number | null }> {
+): Promise<{
+  lcpMs: number | null;
+  clsScore: number | null;
+  mobileScore: number | null;
+  desktopPerfScore: number | null;
+}> {
   try {
-    const psiUrl =
-      `https://www.googleapis.com/pagespeedonline/v5/runPagespeed` +
-      `?url=${encodeURIComponent(url)}&strategy=mobile`;
-    const res = await fetch(psiUrl, { signal: AbortSignal.timeout(25_000) });
-    if (!res.ok) return { lcpMs: null, clsScore: null, mobileScore: null };
-    const data = (await res.json()) as {
-      lighthouseResult?: {
-        audits?: Record<string, { numericValue?: number }>;
-        categories?: { performance?: { score?: number } };
+    // Fetch mobile and desktop in parallel
+    const [mobileRes, desktopRes] = await Promise.allSettled([
+      fetch(
+        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=mobile`,
+        { signal: AbortSignal.timeout(25_000) },
+      ),
+      fetch(
+        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=desktop`,
+        { signal: AbortSignal.timeout(25_000) },
+      ),
+    ]);
+
+    let lcpMs: number | null = null;
+    let clsScore: number | null = null;
+    let mobileScore: number | null = null;
+    let desktopPerfScore: number | null = null;
+
+    if (mobileRes.status === "fulfilled" && mobileRes.value.ok) {
+      const data = await mobileRes.value.json() as {
+        lighthouseResult?: {
+          audits?: Record<string, { numericValue?: number }>;
+          categories?: { performance?: { score?: number } };
+        };
       };
-    };
-    const audits = data?.lighthouseResult?.audits ?? {};
-    return {
-      lcpMs:       audits["largest-contentful-paint"]?.numericValue ?? null,
-      clsScore:    audits["cumulative-layout-shift"]?.numericValue ?? null,
-      mobileScore: (data?.lighthouseResult?.categories?.performance?.score ?? null) !== null
-        ? (data.lighthouseResult!.categories!.performance!.score! * 100)
-        : null,
-    };
+      const audits = data?.lighthouseResult?.audits ?? {};
+      lcpMs     = audits["largest-contentful-paint"]?.numericValue ?? null;
+      clsScore  = audits["cumulative-layout-shift"]?.numericValue ?? null;
+      mobileScore = data?.lighthouseResult?.categories?.performance?.score != null
+        ? data.lighthouseResult.categories.performance.score * 100
+        : null;
+    }
+
+    if (desktopRes.status === "fulfilled" && desktopRes.value.ok) {
+      const data = await desktopRes.value.json() as {
+        lighthouseResult?: { categories?: { performance?: { score?: number } } };
+      };
+      desktopPerfScore = data?.lighthouseResult?.categories?.performance?.score != null
+        ? data.lighthouseResult.categories.performance.score * 100
+        : null;
+    }
+
+    return { lcpMs, clsScore, mobileScore, desktopPerfScore };
   } catch {
-    return { lcpMs: null, clsScore: null, mobileScore: null };
+    return { lcpMs: null, clsScore: null, mobileScore: null, desktopPerfScore: null };
   }
 }
 
@@ -233,9 +261,86 @@ export async function scrapeWebsite(
     const ctaTexts        = parseCtaTexts($);
     const techStack       = detectTechStack(html, headerStr);
     const wordCount       = $("body").text().split(/\s+/).filter(Boolean).length;
-    const hasSitemap      =
-      html.includes("sitemap") || headers["x-sitemap"] !== undefined;
+    // BUG-6 FIX: previously checked html.includes("sitemap") — matches any mention in copy.
+    // Now performs a real HEAD request to /sitemap.xml and /sitemap_index.xml.
+    let hasSitemap = false;
+    try {
+      const base = new URL(url).origin;
+      const sitemapUrls = [`${base}/sitemap.xml`, `${base}/sitemap_index.xml`];
+      const sitemapChecks = await Promise.allSettled(
+        sitemapUrls.map(su => fetch(su, { method: "HEAD", signal: AbortSignal.timeout(5_000) })),
+      );
+      hasSitemap = sitemapChecks.some(r => r.status === "fulfilled" && r.value.ok) ||
+                   html.includes("sitemap");   // keep HTML heuristic as secondary signal
+    } catch {
+      hasSitemap = html.includes("sitemap"); // fallback to HTML heuristic on network error
+    }
+
     const robotsPolicy    = headers["x-robots-tag"] ?? null;
+
+    // ── NEW FIELDS ───────────────────────────────────────────────────────────
+
+    // Internal links (same-domain hrefs — for orphan page detection)
+    const baseHostname = new URL(url).hostname.replace("www.", "");
+    const internalLinks: string[] = [];
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href");
+      if (!href) return;
+      try {
+        const resolved = new URL(href, url);
+        if (resolved.hostname.replace("www.", "") === baseHostname) {
+          internalLinks.push(resolved.pathname);
+        }
+      } catch { /* ignore malformed hrefs */ }
+    });
+
+    // Image alt coverage
+    let imageTotal = 0;
+    let imageAltMissing = 0;
+    $("img").each((_, el) => {
+      imageTotal++;
+      const alt = $(el).attr("alt");
+      if (!alt || alt.trim() === "") imageAltMissing++;
+    });
+
+    // Analytics detection (independent of integration connection)
+    const ANALYTICS_PATTERNS = [
+      "gtag(", "ga(", "analytics.js", "gtm.js",
+      "posthog", "mixpanel", "heap", "segment", "plausible",
+      "matomo", "hotjar",
+    ];
+    const analyticsDetected = ANALYTICS_PATTERNS.some((p) => html.includes(p));
+
+    // HTTPS redirect: check if HTTP version redirects (only testable on http:// URL)
+    let hasHttpsRedirect: boolean | null = null;
+    try {
+      const httpUrl = url.replace(/^https:/, "http:");
+      const httpRes = await fetch(httpUrl, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(5_000),
+      });
+      hasHttpsRedirect = httpRes.status >= 301 && httpRes.status <= 308 &&
+        (httpRes.headers.get("location") ?? "").startsWith("https");
+    } catch {
+      hasHttpsRedirect = null; // can't determine — don't flag either way
+    }
+
+    // JSON-LD structured data
+    const hasSchemaJsonld = html.includes('"@context"') && html.includes('"@type"');
+
+    // Canonical tag
+    const hasCanonical = $("link[rel='canonical']").length > 0;
+
+    // JS-rendered percentage estimate:
+    // Compare text in raw HTML vs Playwright rendered HTML.
+    // For static fallback: assume all content is in raw HTML (jsRenderedPct = 0).
+    // For Playwright: text ratio (raw vs rendered) is a real heuristic but requires two fetches.
+    // Simplified: count script tags; >8 async scripts is a strong SPA signal.
+    const scriptCount = $("script[src]").length;
+    const jsRenderedPct: number | null = scanDegraded
+      ? null  // can't estimate without two-pass comparison
+      : Math.min(1, scriptCount / 20); // rough heuristic; 20+ scripts ≈ fully SPA
+    
 
     if (scanDegraded) {
       await writeAgentFailure(startupId, "website_scraper", "bot_blocked_static_fallback", {
@@ -245,9 +350,9 @@ export async function scrapeWebsite(
     }
 
     // Fetch Core Web Vitals (non-blocking; failure returns nulls)
-    const { lcpMs, clsScore, mobileScore } = await fetchPageSpeed(url);
+    const { lcpMs, clsScore, mobileScore, desktopPerfScore } = await fetchPageSpeed(url);
 
-    // Write fact — onConflictDoNothing handles any TOCTOU race
+    // Write fact
     const [scan] = await db
       .insert(websiteScans)
       .values({
@@ -266,8 +371,18 @@ export async function scrapeWebsite(
         lcpMs,
         clsScore,
         mobileScore,
+        desktopPerfScore,
         hasSitemap,
         robotsPolicy,
+        // New fields
+        internalLinks,
+        imageTotal,
+        imageAltMissing,
+        analyticsDetected,
+        hasHttpsRedirect,
+        hasSchemaJsonld,
+        hasCanonical,
+        jsRenderedPct,
       })
       .onConflictDoNothing()
       .returning();

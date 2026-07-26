@@ -79,7 +79,7 @@ export default function DashboardPage() {
   const [user, setUser] = useState<{ name: string; email: string } | null>(null);
   
   // Navigation Sidebar active tab
-  const [activeTab, setActiveTab] = useState<"brand_create" | "overview" | "seo" | "competitors" | "blogs" | "socials" | "social_connect">("brand_create");
+  const [activeTab, setActiveTab] = useState<"brand_create" | "overview" | "plan" | "seo" | "competitors" | "blogs" | "socials" | "social_connect" | "alerts" | "integrations">("brand_create");
   
   // Brand creation flow state: "input" | "step1" | "step2" | "step3" | "running" | "ready"
   const [createState, setCreateState] = useState<"input" | "step1" | "step2" | "step3" | "running" | "ready">("input");
@@ -125,6 +125,24 @@ export default function DashboardPage() {
   const [tabLoading, setTabLoading] = useState(false);
   const [approveLoading, setApproveLoading] = useState<number | null>(null);
   const [approveError, setApproveError] = useState<string | null>(null);
+
+  // Alerts tab state
+  interface AlertRow {
+    id: string; metricType: string; zScore: number; severity: string;
+    message: string; acknowledged: boolean; source: string;
+    createdAt: string; acknowledgedAt?: string | null;
+  }
+  const [liveAlerts, setLiveAlerts] = useState<AlertRow[]>([]);
+  const [alertAckLoading, setAlertAckLoading] = useState<string | null>(null);
+
+  // Positioning gaps (for competitors tab)
+  interface PositioningGapRow {
+    id: string; gapDescription: string; opportunity?: string | null; confidence?: number | null;
+  }
+  const [positioningGaps, setPositioningGaps] = useState<PositioningGapRow[]>([]);
+
+  // Integration sync loading
+  const [syncLoading, setSyncLoading] = useState<string | null>(null);
 
   // Social integrations state
   const [socialConnections, setSocialConnections] = useState<Record<string, { connected: boolean; handle?: string }>>({
@@ -767,6 +785,22 @@ export default function DashboardPage() {
         })
         .catch(e => console.warn("[dashboard] integrations fetch error:", e));
     }
+
+    // Fetch alerts when on alerts tab
+    if (activeTab === "alerts" && activeBrand) {
+      fetch(`/api/alerts?startupId=${activeBrand.startupId}`)
+        .then(r => r.json())
+        .then(d => { if (d.ok) setLiveAlerts(d.alerts ?? []); })
+        .catch(e => console.warn("[dashboard] alerts fetch error:", e));
+    }
+
+    // Fetch positioning gaps when on competitors tab
+    if (activeTab === "competitors" && activeBrand) {
+      fetch(`/api/positioning-gaps?startupId=${activeBrand.startupId}`)
+        .then(r => r.json())
+        .then(d => { if (d.ok) setPositioningGaps(d.gaps ?? []); })
+        .catch(() => setPositioningGaps([]));
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, activeBrandIndex]);
 
@@ -779,13 +813,15 @@ export default function DashboardPage() {
 
   // Sidebar navigation elements
   const navItems = [
-    { id: "brand_create", label: "Brand Create", icon: "🌐", disabled: false },
-    { id: "overview", label: "Dashboard", icon: "📊", disabled: activeBrandIndex < 0 },
-    { id: "seo", label: "SEO Analysis", icon: "📈", disabled: activeBrandIndex < 0 },
-    { id: "competitors", label: "Competitor Insights", icon: "👥", disabled: activeBrandIndex < 0 },
-    { id: "blogs", label: "Blog Drafts", icon: "✍️", disabled: activeBrandIndex < 0 },
-    { id: "socials", label: "Social Drafts", icon: "📢", disabled: activeBrandIndex < 0 },
-    { id: "social_connect", label: "Social Connect", icon: "🔗", disabled: activeBrandIndex < 0 }
+    { id: "brand_create", label: "Brand Create",       icon: "🌐", disabled: false },
+    { id: "overview",     label: "Dashboard",          icon: "📊", disabled: activeBrandIndex < 0 },
+    { id: "plan",         label: "30-Day Plan",         icon: "🗓️", disabled: activeBrandIndex < 0 },
+    { id: "seo",          label: "SEO Analysis",        icon: "📈", disabled: activeBrandIndex < 0 },
+    { id: "competitors",  label: "Competitor Insights", icon: "👥", disabled: activeBrandIndex < 0 },
+    { id: "blogs",        label: "Blog Drafts",         icon: "✍️", disabled: activeBrandIndex < 0 },
+    { id: "socials",      label: "Social Drafts",       icon: "📢", disabled: activeBrandIndex < 0 },
+    { id: "integrations", label: "Integrations",        icon: "🔗", disabled: activeBrandIndex < 0 },
+    { id: "alerts",       label: "Alerts",              icon: "🔔", disabled: activeBrandIndex < 0 },
   ] as const;
 
   const marketsList = {
@@ -1535,8 +1571,48 @@ export default function DashboardPage() {
                 <>
                   {/* SEO Score Audit Header */}
                   <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-sm">
-                    <h3 className="text-base font-black text-slate-900 font-sans">Search Engine Indexation Audit</h3>
-                    <p className="text-xs text-slate-500 font-semibold">Live analysis from SEOScoreAPI + AI recommendation engine. Results are based on the website URL you provided.</p>
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h3 className="text-base font-black text-slate-900 font-sans">Search Engine Indexation Audit</h3>
+                        <p className="text-xs text-slate-500 font-semibold mt-1">Live analysis from SEOScoreAPI + AI recommendation engine. Results are based on the website URL you provided.</p>
+                      </div>
+                      {/* Download Report Button */}
+                      <button
+                        id="download-seo-report-btn"
+                        onClick={async () => {
+                          if (!activeBrand) return;
+                          const btn = document.getElementById("download-seo-report-btn") as HTMLButtonElement;
+                          const original = btn.innerHTML;
+                          btn.disabled = true;
+                          btn.innerHTML = `<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg><span>Generating…</span>`;
+                          try {
+                            const res = await fetch(`/api/seo-report?startupId=${activeBrand.startupId}`);
+                            if (!res.ok) throw new Error("Report generation failed");
+                            const blob = await res.blob();
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = `seo-audit-${activeBrand.name.replace(/\s+/g, "-").toLowerCase()}-${new Date().toISOString().slice(0,10)}.html`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                          } catch (err) {
+                            console.error("[dashboard] SEO report download error:", err);
+                            alert("Could not generate report. Please try again.");
+                          } finally {
+                            btn.disabled = false;
+                            btn.innerHTML = original;
+                          }
+                        }}
+                        className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-black text-white shrink-0 cursor-pointer transition-all hover:opacity-90 active:scale-95 disabled:opacity-60"
+                        style={{background: "linear-gradient(135deg, #199874 0%, #0ea5e9 100%)", boxShadow: "0 4px 16px rgba(25,152,116,0.35)"}}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M13 7l-3 3-3-3M10 10V3" />
+                          <path d="M3 14v2a2 2 0 002 2h10a2 2 0 002-2v-2" />
+                        </svg>
+                        Download Full Report
+                      </button>
+                    </div>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
                       <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">SEO Score</span>
@@ -2277,6 +2353,261 @@ export default function DashboardPage() {
             </div>
           )}
 
+
+          {/* TAB: PLAN (30-Day Plan with dependency sequencing) */}
+          {activeTab === "plan" && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-black text-slate-900">30-Day Growth Plan</h2>
+                <span className="text-xs text-slate-500">Sequenced by the Plan Agent · Tasks unlock based on dependencies</span>
+              </div>
+              {["Week 1", "Week 2", "Week 3", "Week 4"].map(week => {
+                const weekTasks = tasks.filter(t => t.week === week);
+                return (
+                  <div key={week} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                    <div className="bg-slate-50 px-6 py-3 border-b border-slate-100 flex items-center gap-2">
+                      <span className="text-sm font-black text-slate-800">{week}</span>
+                      <span className="text-xs text-slate-400">{weekTasks.length} task{weekTasks.length !== 1 ? "s" : ""}</span>
+                    </div>
+                    {weekTasks.length === 0 ? (
+                      <div className="px-6 py-4 text-xs text-slate-400 italic">No tasks scheduled — complete earlier weeks to unlock.</div>
+                    ) : (
+                      <div className="divide-y divide-slate-100">
+                        {weekTasks.map(task => (
+                          <div key={task.id} className="px-6 py-4 flex items-start justify-between gap-4">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className={`inline-block w-2 h-2 rounded-full ${
+                                  task.status === "approved" ? "bg-[#199874]" :
+                                  task.status === "ignored" ? "bg-slate-300" :
+                                  task.status === "edited" ? "bg-amber-400" : "bg-blue-400"
+                                }`} />
+                                <p className="text-sm font-bold text-slate-900 truncate">{task.title}</p>
+                                {/* Trust badge */}
+                                <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[#199874]/10 text-[#199874] border border-[#199874]/20">L1</span>
+                              </div>
+                              <p className="text-xs text-slate-500 mb-2">{task.detail}</p>
+                              <div className="flex flex-wrap gap-2 text-[10px]">
+                                <span className="text-slate-400">{task.source}</span>
+                                <span className="font-bold text-[#199874]">{task.metric}</span>
+                                <span className="text-slate-400">via {task.agent}</span>
+                              </div>
+                            </div>
+                            <div className="flex gap-2 shrink-0">
+                              {task.status === "pending" && (
+                                <>
+                                  <button
+                                    disabled={approveLoading === task.id}
+                                    onClick={() => handleTaskStatusChange(task.id, "approved")}
+                                    className="px-3 py-1.5 bg-[#199874] hover:bg-[#158263] text-white text-xs font-bold rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                                  >
+                                    Approve
+                                  </button>
+                                  <button
+                                    onClick={() => handleTaskStatusChange(task.id, "ignored")}
+                                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold rounded-lg transition-colors cursor-pointer"
+                                  >
+                                    Ignore
+                                  </button>
+                                </>
+                              )}
+                              {task.status === "approved" && (
+                                <span className="px-3 py-1.5 bg-[#199874]/10 text-[#199874] text-xs font-bold rounded-lg">✓ Approved</span>
+                              )}
+                              {task.status === "ignored" && (
+                                <span className="px-3 py-1.5 bg-slate-100 text-slate-400 text-xs font-bold rounded-lg">Ignored</span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* TAB: ALERTS / MONITORING */}
+          {activeTab === "alerts" && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-black text-slate-900">Alerts &amp; Monitoring</h2>
+                <span className="text-xs text-slate-500">
+                  {liveAlerts.filter(a => !a.acknowledged).length} unacknowledged
+                </span>
+              </div>
+
+              {liveAlerts.length === 0 ? (
+                <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
+                  <div className="text-4xl mb-3">✅</div>
+                  <p className="text-slate-600 font-bold">No alerts — everything looks healthy.</p>
+                  <p className="text-xs text-slate-400 mt-1">Anomaly detection runs daily. Stripe events surface in real time.</p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50 border-b border-slate-100">
+                      <tr>
+                        <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-wider">Metric</th>
+                        <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-wider">Severity</th>
+                        <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-wider">Source</th>
+                        <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-wider">z-Score</th>
+                        <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-wider">Message</th>
+                        <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-wider">Status</th>
+                        <th className="px-4 py-3"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {liveAlerts.map(alert => (
+                        <tr key={alert.id} className={alert.acknowledged ? "opacity-40" : ""}>
+                          <td className="px-4 py-3 font-bold text-slate-800">{alert.metricType}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-0.5 rounded-full font-black uppercase tracking-wider ${
+                              alert.severity === "critical" ? "bg-red-100 text-red-700" :
+                              alert.severity === "warning"  ? "bg-amber-100 text-amber-700" :
+                              "bg-slate-100 text-slate-600"
+                            }`}>{alert.severity}</span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-0.5 rounded-full font-bold ${
+                              alert.source === "stripe_realtime" ? "bg-purple-100 text-purple-700" : "bg-slate-100 text-slate-600"
+                            }`}>{alert.source === "stripe_realtime" ? "⚡ Stripe" : "📊 Batch"}</span>
+                          </td>
+                          <td className="px-4 py-3 font-mono text-red-600">{alert.zScore.toFixed(2)}</td>
+                          <td className="px-4 py-3 text-slate-600 max-w-xs truncate">{alert.message}</td>
+                          <td className="px-4 py-3">
+                            {alert.acknowledged
+                              ? <span className="text-slate-400">✓ Ack&apos;d</span>
+                              : <span className="text-amber-600 font-bold">Unacknowledged</span>
+                            }
+                          </td>
+                          <td className="px-4 py-3">
+                            {!alert.acknowledged && (
+                              <button
+                                disabled={alertAckLoading === alert.id}
+                                onClick={() => {
+                                  setAlertAckLoading(alert.id);
+                                  fetch(`/api/alerts/${alert.id}/acknowledge`, { method: "PATCH" })
+                                    .then(r => r.json())
+                                    .then(d => {
+                                      if (d.ok) setLiveAlerts(prev => prev.map(a => a.id === alert.id ? { ...a, acknowledged: true } : a));
+                                    })
+                                    .catch(console.error)
+                                    .finally(() => setAlertAckLoading(null));
+                                }}
+                                className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                              >
+                                {alertAckLoading === alert.id ? "..." : "Acknowledge"}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB: INTEGRATIONS (expanded with GA4 + Stripe) */}
+          {activeTab === "integrations" && (
+            <div className="space-y-6">
+              <h2 className="text-lg font-black text-slate-900">Integrations</h2>
+
+              {/* Analytics + Revenue */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="bg-slate-50 px-6 py-3 border-b border-slate-100">
+                  <span className="text-sm font-black text-slate-800">Analytics &amp; Revenue</span>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {[
+                    { id: "ga4",    label: "Google Analytics 4", icon: "📊", description: "Traffic + conversions ingested daily" },
+                    { id: "stripe", label: "Stripe",             icon: "💳", description: "MRR, churn events, failed payments via webhook" },
+                  ].map(intg => {
+                    const conn = socialConnections[intg.id as keyof typeof socialConnections];
+                    return (
+                      <div key={intg.id} className="px-6 py-4 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">{intg.icon}</span>
+                          <div>
+                            <p className="font-bold text-sm text-slate-900">{intg.label}</p>
+                            <p className="text-xs text-slate-400">{intg.description}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                            conn?.connected ? "bg-[#199874]/10 text-[#199874]" : "bg-slate-100 text-slate-400"
+                          }`}>{conn?.connected ? "✓ Connected" : "Not connected"}</span>
+                          <button
+                            disabled={syncLoading === intg.id}
+                            onClick={() => {
+                              if (!activeBrand) return;
+                              setSyncLoading(intg.id);
+                              fetch(`/api/cron/daily`, { headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET ?? ""}` } })
+                                .finally(() => setSyncLoading(null));
+                            }}
+                            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg cursor-pointer disabled:opacity-50"
+                          >
+                            {syncLoading === intg.id ? "Syncing..." : "Sync now"}
+                          </button>
+                          {!conn?.connected && (
+                            <button
+                              onClick={() => handleConnectSocialClick(intg.id, intg.label)}
+                              className="px-3 py-1.5 bg-[#199874] hover:bg-[#158263] text-white text-xs font-bold rounded-lg cursor-pointer"
+                            >
+                              Connect
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Social */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="bg-slate-50 px-6 py-3 border-b border-slate-100">
+                  <span className="text-sm font-black text-slate-800">Social Platforms</span>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {[
+                    { id: "linkedin",  label: "LinkedIn",  icon: "💼" },
+                    { id: "youtube",   label: "YouTube",   icon: "▶️" },
+                    { id: "facebook",  label: "Facebook",  icon: "📘" },
+                    { id: "instagram", label: "Instagram", icon: "📷" },
+                    { id: "twitter",   label: "X/Twitter", icon: "🐦" },
+                  ].map(plat => {
+                    const conn = socialConnections[plat.id as keyof typeof socialConnections];
+                    return (
+                      <div key={plat.id} className="px-6 py-4 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">{plat.icon}</span>
+                          <div>
+                            <p className="font-bold text-sm text-slate-900">{plat.label}</p>
+                            {conn?.handle && <p className="text-xs text-slate-400">@{conn.handle}</p>}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                            conn?.connected ? "bg-[#199874]/10 text-[#199874]" : "bg-slate-100 text-slate-400"
+                          }`}>{conn?.connected ? "✓ Connected" : "Not connected"}</span>
+                          <button
+                            onClick={() => handleConnectSocialClick(plat.id, plat.label)}
+                            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg cursor-pointer"
+                          >
+                            {conn?.connected ? "Manage" : "Connect"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
 
         </div>
       </main>

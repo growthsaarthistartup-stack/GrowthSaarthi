@@ -25,7 +25,10 @@ export type TelemetryEventName =
   | "plan_item_approved"
   | "plan_item_ignored"
   | "briefing_viewed"
-  | "outcome_recorded";
+  | "outcome_recorded"
+  /** SEO agent: keyword waiting for its second weekly snapshot before content_decay can run */
+  | "content_decay_skipped_no_baseline";
+
 
 export async function logEvent(
   startupId: string,

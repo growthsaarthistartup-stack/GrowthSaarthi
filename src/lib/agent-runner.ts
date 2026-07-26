@@ -213,10 +213,12 @@ export async function runAgent<TOutput extends z.ZodTypeAny>(
         err,
       );
 
-      // On the last normal-model attempt, step down to fallback if available
-      if (attempt === maxRetries - 1 && contract.fallbackModel) {
+      // BUG-4 FIX: was `attempt === maxRetries - 1` — stepped down one attempt TOO EARLY,
+      // wasting the last primary-model attempt. Now switches only after all primary retries done.
+      if (attempt === maxRetries && currentModel === contract.model && contract.fallbackModel) {
         currentModel = contract.fallbackModel;
       }
+
     }
   }
 
