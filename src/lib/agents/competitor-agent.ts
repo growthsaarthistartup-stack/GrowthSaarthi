@@ -21,6 +21,7 @@ import { buildIdempotencyKey, isoWeekWindow } from "@/lib/idempotency";
 import { generateULID } from "@/lib/ulid";
 import { runAgent, type AgentContract } from "@/lib/agent-runner";
 import { MODEL_ROUTES } from "@/lib/models";
+import { THIN_PAGE_WORD_THRESHOLD } from "@/lib/scoring/seo-audit-compiler";
 
 // ---------------------------------------------------------------------------
 // Dynamic similarity threshold
@@ -148,61 +149,140 @@ function extractCandidates(results: SerpResult[]): Candidate[] {
 }
 
 // ---------------------------------------------------------------------------
-// Resolve real competitor homepage domain URL via search
+// BUG-1+2 FIX: Resolve real vendor URL from G2 or ProductHunt review page
+// instead of blindly constructing https://www.{slug}.com (which is often wrong)
 // ---------------------------------------------------------------------------
 
-async function resolveRealUrl(productName: string): Promise<string | null> {
+/**
+ * Single consolidated noise domain list used throughout this file.
+ * Both the SerpAPI result filter and the URL resolver reference this same Set,
+ * ensuring consistent filtering without two separate lists that can drift apart.
+ */
+const NOISE_HOSTS = new Set([
+  // Social networks & communities
+  "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
+  "reddit.com", "quora.com", "youtube.com",
+  // Reference & encyclopaedia
+  "wikipedia.org", "medium.com",
+  // Review aggregators (we resolve actual vendor URLs from these, but never treat them as the vendor)
+  "g2.com", "producthunt.com", "capterra.com", "getapp.com", "softwareadvice.com", "trustpilot.com",
+  // Job boards & HR
+  "ziprecruiter.com", "glassdoor.com", "indeed.com",
+  // Business intelligence
+  "cbinsights.com", "crunchbase.com", "muckrack.com",
+]);
+
+
+async function resolveVendorUrlFromReviewPage(reviewPageUrl: string, productName: string): Promise<string | null> {
+  // First: try to extract vendor URL from the review page HTML (e.g. G2 "Visit Website" link)
   try {
-    const results = await searchSerpApi(productName);
-    for (const r of results) {
-      const url = r.link;
-      if (!url) continue;
-      const parsed = new URL(url);
-      const host = parsed.hostname;
-      if (
-        host.includes("g2.com") ||
-        host.includes("producthunt.com") ||
-        host.includes("wikipedia.org") ||
-        host.includes("twitter.com") ||
-        host.includes("linkedin.com") ||
-        host.includes("youtube.com") ||
-        host.includes("facebook.com")
-      ) {
-        continue;
+    const res = await fetch(reviewPageUrl, {
+      signal: AbortSignal.timeout(8_000),
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; GrowthSaarthi/1.0)" },
+    });
+    if (res.ok) {
+      const html = await res.text();
+      const $ = cheerio.load(html);
+
+      // G2 pattern: data-track link, og:url, or canonical
+      const ogUrl = $("meta[property='og:url']").attr("content");
+      if (ogUrl) {
+        try {
+          const parsed = new URL(ogUrl);
+          if (!NOISE_HOSTS.has(parsed.hostname.replace(/^www\./, ""))) {
+            return `${parsed.protocol}//${parsed.hostname}`;
+          }
+        } catch { /* ignore */ }
       }
-      return `${parsed.protocol}//${host}`;
+
+      // Look for external link labelled "Visit Website" or href with vendor domain
+      let foundUrl: string | null = null;
+      $("a[href]").each((_, el) => {
+        if (foundUrl) return;
+        const href = $(el).attr("href") ?? "";
+        const text = $(el).text().toLowerCase();
+        if (text.includes("visit website") || text.includes("official site") || text.includes("website")) {
+          try {
+            const parsed = new URL(href);
+            if (!NOISE_HOSTS.has(parsed.hostname.replace(/^www\./, ""))) {
+              foundUrl = `${parsed.protocol}//${parsed.hostname}`;
+            }
+          } catch { /* ignore */ }
+        }
+      });
+      if (foundUrl) return foundUrl;
     }
-  } catch {}
+  } catch { /* fall through to SerpAPI backup */ }
+
+  // Fallback: single SerpAPI call using product name (not per-candidate, shared)
+  try {
+    const results = await searchSerpApi(`${productName} official site`);
+    for (const r of results) {
+      if (!r.link) continue;
+      try {
+        const parsed = new URL(r.link);
+        const host = parsed.hostname.replace(/^www\./, "");
+        if (!NOISE_HOSTS.has(host)) return `${parsed.protocol}//${parsed.hostname}`;
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// Scrape text content (Cheerio)
+// Multi-page competitor scraper
+// Scrapes homepage + /pricing + /features + /about for richer intelligence
 // ---------------------------------------------------------------------------
 
-async function scrapeCompetitorSiteText(url: string): Promise<string | null> {
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10_000),
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; GrowthSaarthi/1.0)" },
-    });
-    if (!res.ok) return null;
-    const html = await res.text();
-    const $    = cheerio.load(html);
+async function scrapeCompetitorMultiPage(baseUrl: string): Promise<string | null> {
+  const HIGH_VALUE_PATHS = ["", "/pricing", "/features", "/about", "/product"];
 
-    const texts: string[] = [];
-    $("h1, h2, h3").each((_, el) => {
-      texts.push($(el).text().trim());
-    });
-    $("p").slice(0, 10).each((_, el) => {
-      texts.push($(el).text().trim());
-    });
+  const pageTexts = await Promise.allSettled(
+    HIGH_VALUE_PATHS.map(async (path) => {
+      const url = `${baseUrl.replace(/\/$/, "")}${path}`;
+      try {
+        const res = await fetch(url, {
+          signal: AbortSignal.timeout(8_000),
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; GrowthSaarthi/1.0)" },
+        });
+        if (!res.ok) return null;
+        const html = await res.text();
+        const $ = cheerio.load(html);
 
-    return texts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 1500);
-  } catch {
-    return null;
-  }
+        const texts: string[] = [];
+        if (path === "") {
+          // Homepage: headings + first 10 paragraphs
+          $("h1, h2, h3").each((_, el) => { texts.push($(el).text().trim()); });
+          $("p").slice(0, 10).each((_, el) => { texts.push($(el).text().trim()); });
+        } else if (path === "/pricing") {
+          // Pricing page: emphasis on price values, plan names, feature lists
+          $("h1, h2, h3, [class*='plan'], [class*='price'], [class*='tier']").each((_, el) => {
+            texts.push($(el).text().trim());
+          });
+          $("li, p").slice(0, 20).each((_, el) => { texts.push($(el).text().trim()); });
+        } else {
+          // Features/About: all headings + first 15 list items
+          $("h1, h2, h3").each((_, el) => { texts.push($(el).text().trim()); });
+          $("li").slice(0, 15).each((_, el) => { texts.push($(el).text().trim()); });
+          $("p").slice(0, 8).each((_, el) => { texts.push($(el).text().trim()); });
+        }
+
+        return texts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  const combined = pageTexts
+    .filter((r): r is PromiseFulfilledResult<string | null> => r.status === "fulfilled" && !!r.value)
+    .map(r => r.value as string)
+    .join(" | ");
+
+  return combined.slice(0, 3000) || null;
 }
+
 
 // ---------------------------------------------------------------------------
 // AI Agents definition
@@ -374,26 +454,29 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
       return true;
     });
 
-    // Filter noise domains before candidate extraction
-    const NOISE_DOMAINS = [
-      "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
-      "reddit.com", "quora.com", "youtube.com", "wikipedia.org", "medium.com",
-      "ziprecruiter.com", "glassdoor.com", "indeed.com", "muckrack.com",
-      "cbinsights.com", "crunchbase.com", "espncricinfo.com", "dasinc.com",
-    ];
+    // Filter noise domains before candidate extraction using the shared NOISE_HOSTS set
     const cleanResults = dedupedResults.filter(r => {
       if (!r.link) return false;
       try {
-        const host = new URL(r.link).hostname;
-        return !NOISE_DOMAINS.some(noise => host.includes(noise));
+        const host = new URL(r.link).hostname.replace(/^www\./, "");
+        return !NOISE_HOSTS.has(host) && !Array.from(NOISE_HOSTS).some(n => host.endsWith(`.${n}`));
       } catch { return false; }
     });
 
     const candidates = extractCandidates(cleanResults).slice(0, 20);
 
-    // Embed startup text
-    const startupText = [startup.name, extractedProfile.industry, ...extractedProfile.services].filter(Boolean).join(" — ");
-    const startupVec  = await embed(startupText);
+    // BUG-3 FIX: Embed startup using same content depth as competitor scrape
+    // Previously only embedded "name + industry" (3 tokens) vs competitor's 1000-char paragraphs.
+    // Now uses title + h1 + heroCopy + industry + services for a semantically equivalent vector.
+    const startupText = [
+      startup.name,
+      extractedProfile.industry,
+      ...extractedProfile.services,
+      scan?.title ?? "",
+      scan?.h1 ?? "",
+      (scan?.heroCopy ?? "").slice(0, 300),
+    ].filter(Boolean).join(" ");
+    const startupVec  = await embed(startupText.slice(0, 1000));
 
     const candidateSims: Array<{
       candidate: Candidate;
@@ -403,28 +486,27 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
       resolvedUrl: string;
     }> = [];
 
-    // 4. Scrape and analyze each candidate
+    // 4. Scrape and analyze each candidate (multi-page)
     for (const candidate of candidates) {
       let resolvedUrl = candidate.url;
 
-      // If review site, resolve to real brand URL first
+      // BUG-1+2 FIX: If candidate came from a G2 or PH review page, resolve the real vendor URL
+      // by scraping the review page itself (not blindly constructing slug.com)
       if (resolvedUrl.includes("g2.com") || resolvedUrl.includes("producthunt.com")) {
-        const realUrl = await resolveRealUrl(candidate.name);
+        const realUrl = await resolveVendorUrlFromReviewPage(resolvedUrl, candidate.name);
         if (realUrl) resolvedUrl = realUrl;
+        else continue; // Can't resolve → skip this candidate
       }
 
-      console.info(`[competitor-agent] Scraping candidate ${candidate.name} at: ${resolvedUrl}`);
-      let scrapedText = await scrapeCompetitorSiteText(resolvedUrl);
+      // Skip our own startup domain
+      try {
+        const candidateHost = new URL(resolvedUrl).hostname.replace(/^www\./, "");
+        const startupHost   = startup.url ? new URL(startup.url).hostname.replace(/^www\./, "") : "";
+        if (startupHost && candidateHost === startupHost) continue;
+      } catch { /* ignore */ }
 
-      // Fallback domain resolution if scrape fails
-      if (!scrapedText || scrapedText.length < 50) {
-        const fallbackUrl = await resolveRealUrl(candidate.name);
-        if (fallbackUrl && fallbackUrl !== resolvedUrl) {
-          console.info(`[competitor-agent] Retrying candidate ${candidate.name} at fallback: ${fallbackUrl}`);
-          resolvedUrl = fallbackUrl;
-          scrapedText = await scrapeCompetitorSiteText(resolvedUrl);
-        }
-      }
+      console.info(`[competitor-agent] Multi-page scraping: ${candidate.name} at ${resolvedUrl}`);
+      const scrapedText = await scrapeCompetitorMultiPage(resolvedUrl);
 
       if (!scrapedText || scrapedText.length < 50) continue;
 
@@ -432,7 +514,8 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
         const extraction = await runAgent(COMPETITOR_EXTRACTOR_AGENT, {
           competitorName: candidate.name,
           competitorUrl: resolvedUrl,
-          homepageText: scrapedText.slice(0, 1500),
+          // Provide up to 3000 chars (multi-page content)
+          homepageText: scrapedText.slice(0, 3000),
         });
 
         if (extraction) {
@@ -445,16 +528,19 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
       }
     }
 
-    // 5. Filter and save candidates meeting dynamic similarity threshold
+    // 5. Filter and save candidates — sorted descending by similarity so the best matches come first
     const allScores = candidateSims.map((c) => c.similarity);
     const threshold = computeDynamicThreshold(allScores);
     console.info(`[competitor-agent] Dynamic similarity threshold: ${threshold.toFixed(3)}`);
 
+    // BUG-7 FIX: Sort by similarity DESC before inserting so dashboard ordering is meaningful
+    const sortedSims = candidateSims
+      .filter(c => c.similarity >= threshold)
+      .sort((a, b) => b.similarity - a.similarity);
+
     const confirmedCompetitors: CompetitorRow[] = [];
 
-    for (const { candidate, extracted, scrapedText, similarity, resolvedUrl } of candidateSims) {
-      if (similarity < threshold) continue;
-
+    for (const { candidate, extracted, similarity, resolvedUrl } of sortedSims) {
       const [comp] = await db
         .insert(competitors)
         .values({
@@ -463,11 +549,15 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
           idempotencyKey:   weekKey + ":" + resolvedUrl,
           name:             candidate.name,
           url:              resolvedUrl,
-          heroCopy:         scrapedText.slice(0, 500),
+          // BUG-4 FIX: Store clean AI-extracted positioningAngle as the display heroCopy
+          // Previously stored raw scraped text (noisy headings dump)
+          heroCopy:         extracted.positioningAngle,
           positioningAngle: extracted.positioningAngle,
-          pricingModel:     extracted.pricingModel || "Contact Sales",
+          pricingModel:     extracted.pricingModel || null,
           pricingTiers:     extracted.pricingTiers || [],
           features:         extracted.features || [],
+          // BUG-7 FIX: Persist the similarity score for ranking and display
+          similarityScore:  Math.round(similarity * 1000) / 1000,
         })
         .onConflictDoNothing()
         .returning();
@@ -501,7 +591,9 @@ export async function discoverCompetitors(startupId: string): Promise<Competitor
                 .values({
                   id:             generateULID(),
                   startupId,
-                  competitorId:   confirmedCompetitors[Math.min(idx, confirmedCompetitors.length - 1)]?.id,
+                  // BUG-5 FIX: Round-robin attribution across all confirmed competitors
+                  // Previously: all overflow gaps assigned to last competitor by index
+                  competitorId:   confirmedCompetitors[idx % confirmedCompetitors.length]?.id,
                   idempotencyKey: weekKey + ":gap:" + idx,
                   gapDescription: gap.gapDescription,
                   opportunity:    gap.opportunity ?? null,

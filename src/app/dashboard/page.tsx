@@ -199,12 +199,10 @@ export default function DashboardPage() {
       return;
     }
 
-    const sid = activeBrand.startupId;
     fetch("/api/integrations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        startupId: sid,
         type: connectPlatform,
         connected: true,
         accessToken: connectToken || "simulated_token",
@@ -228,14 +226,12 @@ export default function DashboardPage() {
     if (!activeBrand) return;
     if (!window.confirm(`Are you sure you want to disconnect ${platId}?`)) return;
 
-    const sid = activeBrand.startupId;
     fetch("/api/integrations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        startupId: sid,
         type: platId,
-        connected: false
+        connected: false,
       })
     })
     .then(res => res.json())
@@ -257,7 +253,7 @@ export default function DashboardPage() {
     fetch("/api/content-drafts/suggest-topics", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ startupId: activeBrand.startupId })
+      body: JSON.stringify({})
     })
     .then(res => res.json())
     .then(data => {
@@ -290,8 +286,7 @@ export default function DashboardPage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        startupId: activeBrand.startupId,
-        topic: `Title: ${editedTitle}\nKeywords: ${editedKeywords}`
+        topic: `Title: ${editedTitle}\nKeywords: ${editedKeywords}`,
       })
     })
     .then(res => res.json())
@@ -336,23 +331,29 @@ export default function DashboardPage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        startupId: activeBrand.startupId,
         draftId: generatedBlog.id,
-        platforms: selectedPlatforms
+        platforms: selectedPlatforms,
       })
     })
     .then(res => res.json())
     .then(data => {
       if (data.ok) {
         setPublishSuccess(true);
-        // Refresh drafts list
-        fetch(`/api/content-drafts?startupId=${activeBrand.startupId}&type=blog`)
+        // Refresh blog drafts list
+        fetch("/api/content-drafts?type=blog")
           .then(r => r.json())
           .then(d => { if (d.ok) setLiveBlogDrafts(d.drafts ?? []); });
-        // Also refresh social drafts list
-        fetch(`/api/content-drafts?startupId=${activeBrand.startupId}&type=linkedin`)
-          .then(r => r.json())
-          .then(d => { if (d.ok) setLiveSocialDrafts(d.drafts ?? []); });
+        // Refresh all social platform drafts
+        Promise.all([
+          fetch("/api/content-drafts?type=linkedin").then(r => r.json()).catch(() => null),
+          fetch("/api/content-drafts?type=twitter").then(r => r.json()).catch(() => null),
+          fetch("/api/content-drafts?type=instagram").then(r => r.json()).catch(() => null),
+          fetch("/api/content-drafts?type=facebook").then(r => r.json()).catch(() => null),
+          fetch("/api/content-drafts?type=youtube").then(r => r.json()).catch(() => null),
+        ]).then(results => {
+          const allDrafts = results.filter(d => d?.ok).flatMap(d => d?.drafts ?? []);
+          setLiveSocialDrafts(allDrafts);
+        });
       }
     })
     .catch(err => console.error("[dashboard] publish blog error:", err))
@@ -628,35 +629,34 @@ export default function DashboardPage() {
     const task = activeBrandData.tasks.find(t => t.id === id);
     if (!task) return;
 
-    const startupId = activeBrandData.startupId;
-    const recId     = task.recId;
+    const recId = task.recId;
 
     if (nextStatus === "ignored") {
-      // Call ignore endpoint if we have a real recId
-      if (recId && !recId.startsWith("rec_")) {
+      // Call ignore endpoint if we have a real recId (not a demo placeholder)
+      if (recId && !recId.startsWith("rec_") && !recId.startsWith("demo_")) {
         fetch(`/api/recommendations/${recId}/ignore`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ startupId }),
+          body: JSON.stringify({}),
         }).catch(e => console.warn("[dashboard] ignore API error:", e));
       }
       return;
     }
 
     // Approved — call real approve endpoint which triggers LLM draft agents
-    if (recId && !recId.startsWith("rec_")) {
+    if (recId && !recId.startsWith("rec_") && !recId.startsWith("demo_")) {
       setApproveLoading(id);
       try {
         const res = await fetch(`/api/recommendations/${recId}/approve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ startupId }),
+          body: JSON.stringify({}),
         });
         const data = await res.json();
 
         if (data.ok && data.draftId) {
           // Fetch the real LLM-generated draft content
-          const draftRes = await fetch(`/api/content-drafts?startupId=${startupId}`);
+          const draftRes = await fetch("/api/content-drafts");
           const draftData = await draftRes.json();
           const draft = draftData.drafts?.find((d: ContentDraft) => d.id === data.draftId);
 
@@ -693,9 +693,19 @@ export default function DashboardPage() {
         setApproveLoading(null);
       }
     } else {
-      // Mock recId (no DB) — show a confirmation modal without API call
-      setDraftTitle(task.title);
-      setDraftContent(`Task approved. Since this is a demo scan (no live database), the actual agent pipeline is not invoked.\n\nIn production, approving this task would:\n- Trigger the ${task.agent} to generate content\n- Route through the ExecutionGate trust ladder\n- Return an AI-drafted document for your review\n\nTask: ${task.title}\nSource: ${task.source}\nMetric target: ${task.metric}`);
+      // Demo mode (no DB) — show a rich preview of what would happen
+      setDraftTitle(`[Demo Preview] ${task.title}`);
+      setDraftContent(
+        `🎯 DEMO MODE — Real Pipeline Preview\n\n` +
+        `If this were a live workspace, approving "${task.title}" would:\n\n` +
+        `• Trigger the ${task.agent} with your actual site data\n` +
+        `• Route through the ExecutionGate trust ladder (risk: ${task.agent.includes("Revenue") ? "HIGH" : "LOW"})\n` +
+        `• Return a fully AI-drafted document for your review\n` +
+        `• Record the approval in your startup's activity log\n\n` +
+        `📊 Target Metric: ${task.metric}\n` +
+        `🔍 Evidence Source: ${task.source}\n\n` +
+        `Connect a database and website URL to unlock the full agent pipeline.`
+      );
       setActiveDraftTask({ ...task, status: nextStatus });
     }
   };
@@ -727,9 +737,10 @@ export default function DashboardPage() {
       setTabLoading(true);
       setLiveCompetitors([]);
       setPositioningGaps([]);
+      // Note: routes now use session auth — no ?startupId= needed
       Promise.all([
-        fetch(`/api/competitors?startupId=${sid}`).then(r => r.json()).catch(() => null),
-        fetch(`/api/positioning-gaps?startupId=${sid}`).then(r => r.json()).catch(() => null),
+        fetch("/api/competitors").then(r => r.json()).catch(() => null),
+        fetch("/api/positioning-gaps").then(r => r.json()).catch(() => null),
       ])
         .then(([compData, gapData]) => {
           if (compData?.ok) setLiveCompetitors(compData.competitors ?? []);
@@ -742,10 +753,8 @@ export default function DashboardPage() {
     if (activeTab === "seo") {
       setTabLoading(true);
       Promise.all([
-        fetch(`/api/recommendations?startupId=${sid}`).then(r => r.json()),
-        brand.url
-          ? fetch(`/api/seo-audit?url=${encodeURIComponent(brand.url)}&startupId=${sid}`).then(r => r.json()).catch(() => null)
-          : Promise.resolve(null),
+        fetch("/api/recommendations").then(r => r.json()),
+        fetch("/api/seo-audit").then(r => r.json()).catch(() => null),
       ])
         .then(([recsData, auditData]) => {
           if (recsData?.ok) setLiveSeoRecs(recsData.recommendations ?? []);
@@ -757,7 +766,7 @@ export default function DashboardPage() {
 
     if (activeTab === "blogs") {
       setTabLoading(true);
-      fetch(`/api/content-drafts?startupId=${sid}&type=blog`)
+      fetch("/api/content-drafts?type=blog")
         .then(r => r.json())
         .then(d => { if (d.ok) setLiveBlogDrafts(d.drafts ?? []); })
         .catch(e => console.warn("[dashboard] blog drafts fetch error:", e))
@@ -766,15 +775,26 @@ export default function DashboardPage() {
 
     if (activeTab === "socials") {
       setTabLoading(true);
-      fetch(`/api/content-drafts?startupId=${sid}&type=linkedin`)
-        .then(r => r.json())
-        .then(d => { if (d.ok) setLiveSocialDrafts(d.drafts ?? []); })
+      // Fetch social drafts for ALL platforms (linkedin, twitter, instagram, facebook, youtube)
+      Promise.all([
+        fetch("/api/content-drafts?type=linkedin").then(r => r.json()).catch(() => null),
+        fetch("/api/content-drafts?type=twitter").then(r => r.json()).catch(() => null),
+        fetch("/api/content-drafts?type=instagram").then(r => r.json()).catch(() => null),
+        fetch("/api/content-drafts?type=facebook").then(r => r.json()).catch(() => null),
+        fetch("/api/content-drafts?type=youtube").then(r => r.json()).catch(() => null),
+      ])
+        .then((results) => {
+          const allDrafts = results
+            .filter(d => d?.ok)
+            .flatMap(d => d?.drafts ?? []);
+          setLiveSocialDrafts(allDrafts);
+        })
         .catch(e => console.warn("[dashboard] social drafts fetch error:", e))
         .finally(() => setTabLoading(false));
     }
 
-    if (activeTab === "social_connect" || activeTab === "blogs") {
-      fetch(`/api/integrations?startupId=${sid}`)
+    if (activeTab === "social_connect" || activeTab === "integrations" || activeTab === "blogs") {
+      fetch("/api/integrations")
         .then(r => r.json())
         .then(d => {
           if (d.ok && d.integrations) {
@@ -794,7 +814,7 @@ export default function DashboardPage() {
                 } catch {}
                 newConns[item.type as keyof typeof newConns] = {
                   connected: item.connected,
-                  handle
+                  handle,
                 };
               }
             });
@@ -805,8 +825,8 @@ export default function DashboardPage() {
     }
 
     // Fetch alerts when on alerts tab
-    if (activeTab === "alerts" && activeBrand) {
-      fetch(`/api/alerts?startupId=${activeBrand.startupId}`)
+    if (activeTab === "alerts") {
+      fetch("/api/alerts")
         .then(r => r.json())
         .then(d => { if (d.ok) setLiveAlerts(d.alerts ?? []); })
         .catch(e => console.warn("[dashboard] alerts fetch error:", e));
@@ -1814,16 +1834,16 @@ export default function DashboardPage() {
                                 <div className="font-bold text-slate-950">
                                   <a href={comp.url || "#"} target="_blank" rel="noopener noreferrer" className="hover:text-[#199874] underline decoration-dotted">{comp.name}</a>
                                 </div>
-                                {comp.url && <div className="text-[10px] text-slate-400 truncate max-w-[160px]">{comp.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}</div>}
+                                {comp.url && <div className="text-[10px] text-slate-400 break-all">{comp.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}</div>}
                               </td>
-                              <td className="px-4 py-3 max-w-[220px]">
-                                <p className="line-clamp-3 text-slate-700 leading-relaxed">{comp.positioningAngle || comp.heroCopy?.slice(0, 100) || "—"}</p>
+                              <td className="px-4 py-3 min-w-[200px]">
+                                <p className="text-slate-700 leading-relaxed whitespace-pre-line">{comp.positioningAngle || comp.heroCopy || "—"}</p>
                               </td>
                               <td className="px-4 py-3">
                                 <span className="font-bold text-amber-700">{comp.pricingModel || "—"}</span>
                                 {comp.pricingTiers && comp.pricingTiers.length > 0 && (
                                   <div className="mt-1 flex flex-col gap-0.5">
-                                    {comp.pricingTiers.slice(0, 3).map((tier: string, i: number) => (
+                                    {comp.pricingTiers.map((tier: string, i: number) => (
                                       <span key={i} className="text-[9px] text-slate-500 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded">{tier}</span>
                                     ))}
                                   </div>
@@ -1832,7 +1852,7 @@ export default function DashboardPage() {
                               <td className="px-4 py-3">
                                 <div className="flex flex-wrap gap-1">
                                   {comp.features && comp.features.length > 0
-                                    ? comp.features.slice(0, 5).map((f: string, idx: number) => (
+                                    ? comp.features.map((f: string, idx: number) => (
                                       <span key={idx} className="text-[9px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full border border-slate-200">{f}</span>
                                     ))
                                     : <span className="text-[10px] text-slate-400">Parsing…</span>
@@ -1871,9 +1891,10 @@ export default function DashboardPage() {
                           {comp.heroCopy && (
                             <div className="text-xs text-slate-500 leading-relaxed italic border-l-4 border-slate-200 pl-3">
                               <strong className="text-[10px] font-black text-slate-400 not-italic uppercase tracking-wide block mb-1">Scraped Homepage Copy</strong>
-                              &ldquo;{comp.heroCopy.slice(0, 300)}{comp.heroCopy.length > 300 ? "…" : ""}&rdquo;
+                              &ldquo;{comp.heroCopy}&rdquo;
                             </div>
                           )}
+
                           {comp.features && comp.features.length > 0 && (
                             <div className="flex flex-wrap gap-1.5">
                               {comp.features.map((f: string, i: number) => (

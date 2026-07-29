@@ -99,10 +99,14 @@ export async function POST(request: NextRequest): Promise<Response> {
 
     if (secret) {
       event = stripe.webhooks.constructEvent(body, signature, secret);
-    } else {
-      // Dev mode: skip signature verification
-      console.warn("[stripe-webhook] STRIPE_WEBHOOK_SECRET not set — skipping sig verification");
+    } else if (process.env.NODE_ENV === "test") {
+      // Only skip signature verification in automated test environments
+      console.warn("[stripe-webhook] STRIPE_WEBHOOK_SECRET not set — skipping sig verification (test mode only)");
       event = JSON.parse(body) as Stripe.Event;
+    } else {
+      // Production/staging without a secret is a misconfiguration — reject immediately
+      console.error("[stripe-webhook] STRIPE_WEBHOOK_SECRET is not configured. Set it in your environment variables.");
+      return Response.json({ error: "Webhook not configured" }, { status: 500 });
     }
   } catch (err) {
     // Invalid signature — return 400 so Stripe knows not to retry this exact payload
@@ -124,12 +128,22 @@ export async function POST(request: NextRequest): Promise<Response> {
 
     const startupId  = await resolveStartupId(stripe, customerId);
 
+    // INT-1 FIX: Only write DB rows when we have a valid startupId.
+    // Writing startupId="unknown" would either violate the FK constraint or
+    // produce orphan rows that are impossible to attribute later.
+    if (!startupId) {
+      console.warn(
+        `[stripe-webhook] Could not resolve startup for customer ${customerId} (event: ${event.type}) — skipping DB write`,
+      );
+      return Response.json({ received: true });
+    }
+
     // Idempotency: Stripe event ID is already globally unique → use as PK directly
     await db
       .insert(stripeEvents)
       .values({
         id:         event.id,                           // Stripe event ID as PK
-        startupId:  startupId ?? "unknown",
+        startupId,                                      // guaranteed non-null (guarded above)
         eventType:  event.type,
         severity,
         customerId: customerId,
@@ -140,10 +154,9 @@ export async function POST(request: NextRequest): Promise<Response> {
       })
       .onConflictDoNothing();                           // Stripe retries → no-op
 
-    if (severity === "HIGH" && startupId) {
+    if (severity === "HIGH") {
       console.error(
-        `[stripe-webhook] HIGH severity event ${event.type} for customer ${customerId}` +
-          (startupId ? ` (startup: ${startupId})` : " — startup not resolved"),
+        `[stripe-webhook] HIGH severity event ${event.type} for customer ${customerId} (startup: ${startupId})`,
       );
 
       // Write real-time alert — bypasses z-score batch job (spec §1d)
@@ -174,10 +187,6 @@ export async function POST(request: NextRequest): Promise<Response> {
           source:         "stripe_realtime",
         })
         .onConflictDoNothing();           // idempotent — Stripe may retry
-    } else if (severity === "HIGH") {
-      console.error(
-        `[stripe-webhook] HIGH severity event ${event.type} — startup not resolved for customer ${customerId}`,
-      );
     }
   } catch (err) {
     // Write failure fact if we have any startup context, otherwise just log

@@ -685,11 +685,13 @@ function escapeHtml(s: string | null | undefined): string {
 // Route handler
 // ---------------------------------------------------------------------------
 
+import { requireStartupAuth } from "@/lib/api-auth";
+
 export async function GET(request: NextRequest): Promise<Response> {
-  const startupId = request.nextUrl.searchParams.get("startupId");
-  if (!startupId) {
-    return new Response("startupId query param required", { status: 400 });
-  }
+  // Authenticate — startupId always derived from the session, not query param
+  const auth = await requireStartupAuth(request);
+  if (auth.error) return auth.error;
+  const startupId = auth.startupId!;
 
   // Demo mode fallback — if database URL is absent
   if (!process.env.DATABASE_URL) {

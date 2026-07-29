@@ -151,6 +151,16 @@ export const websiteScans = pgTable("website_scans", {
   jsRenderedPct:     real("js_rendered_pct"),   // 0.0–1.0; higher = worse for AI crawlers
   pageWeightKb:      real("page_weight_kb"),    // total downloadable weight in KB
   detailsJson:       text("details_json"),
+
+  // NEW: Multi-page crawl aggregates
+  totalPagesFound:       integer("total_pages_found"),       // URLs discovered in sitemap
+  crawledPageCount:      integer("crawled_page_count"),      // pages actually fetched
+  pagesWithMissingMeta:  integer("pages_with_missing_meta"), // pages lacking meta description
+  pagesWithMissingH1:    integer("pages_with_missing_h1"),   // pages with broken/absent H1
+  pagesWithThinContent:  integer("pages_with_thin_content"), // pages < 300 words
+  totalImagesMissingAlt: integer("total_images_missing_alt"),// site-wide missing alt count
+  duplicateTitles:       text("duplicate_titles").array(),   // repeated title tag values
+  orphanPages:           text("orphan_pages").array(),       // pages in sitemap but 0 inbound links
 });
 
 // ---------------------------------------------------------------------------
@@ -170,6 +180,7 @@ export const competitors = pgTable("competitors", {
   pricingModel:      text("pricing_model"),
   pricingTiers:      text("pricing_tiers").array(),
   features:          text("features").array(),
+  similarityScore:   real("similarity_score"),              // cosine similarity to startup embedding
   detectedAt:        timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -22,22 +22,17 @@ import { generateULID } from "@/lib/ulid";
 import { buildIdempotencyKey, todayWindow } from "@/lib/idempotency";
 import { getTrustLevel, adjustWeights } from "@/lib/trust-ladder";
 import { logEvent } from "@/lib/telemetry";
+import { requireStartupAuth } from "@/lib/api-auth";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<Response> {
+  const auth = await requireStartupAuth(request);
+  if (auth.error) return auth.error;
+  const startupId = auth.startupId!;
+
   const { id: recId } = await params;
-
-  let body: { startupId?: string };
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const { startupId } = body;
-  if (!startupId) return Response.json({ error: "startupId required" }, { status: 400 });
 
   // ── 1. Load recommendation ──────────────────────────────────────────────
   const [rec] = await db

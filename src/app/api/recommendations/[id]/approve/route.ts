@@ -29,6 +29,7 @@ import { executionGate, ExecutionBlocked } from "@/lib/execution-gate";
 import { generateBlogDraft } from "@/lib/agents/blog-draft-agent";
 import { generateSocialDraft } from "@/lib/agents/social-draft-agent";
 import { logEvent } from "@/lib/telemetry";
+import { requireStartupAuth } from "@/lib/api-auth";
 
 // category → ExecutionGate action_risk mapping
 function actionRisk(category: string): string {
@@ -42,17 +43,12 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<Response> {
+  // Auth guard — startupId from session prevents IDOR
+  const auth = await requireStartupAuth(request);
+  if (auth.error) return auth.error;
+  const startupId = auth.startupId!;
+
   const { id: recId } = await params;
-
-  let body: { startupId?: string };
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const { startupId } = body;
-  if (!startupId) return Response.json({ error: "startupId required" }, { status: 400 });
 
   // ── 1. Load recommendation ──────────────────────────────────────────────
   const [rec] = await db

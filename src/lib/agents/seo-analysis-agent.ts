@@ -36,6 +36,12 @@ import { getOrFetchSeoAudit } from "@/lib/integrations/seo-score-api";
 import { logEvent } from "@/lib/telemetry";
 import { generateULID } from "@/lib/ulid";
 import type { RecommendationRow } from "@/lib/scoring/recommendation-engine";
+import {
+  AUDIT_SCORE_ISSUE_THRESHOLD,
+  AUDIT_GRADE_FAIL_GRADES,
+  THIN_CONTENT_WORD_THRESHOLD,
+  THIN_PAGE_WORD_THRESHOLD,
+} from "@/lib/scoring/seo-audit-compiler";
 
 // ---------------------------------------------------------------------------
 // Issue types
@@ -377,7 +383,7 @@ async function detectIssues(
 
   // 1. Overall SEO score — guard against null score/grade (BUG-3 fix made them nullable)
   if (audit && audit.score != null && audit.grade != null &&
-      (audit.score < 80 || ["C", "D", "F"].includes(audit.grade))) {
+      (audit.score < AUDIT_SCORE_ISSUE_THRESHOLD || AUDIT_GRADE_FAIL_GRADES.has(audit.grade))) {
     issues.push({
       type: "low_overall_seo_score",
       evidenceFactIds: [scan.id],

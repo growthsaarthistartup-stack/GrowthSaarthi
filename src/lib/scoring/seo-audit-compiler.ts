@@ -7,6 +7,46 @@ export interface AuditCheck {
   recommendation: string;
 }
 
+// ---------------------------------------------------------------------------
+// Audit thresholds — all in one place for easy calibration. Never scatter
+// magic numbers across check logic; always reference these constants.
+// ---------------------------------------------------------------------------
+
+/** Minimum word count for a homepage to be considered non-thin content */
+export const THIN_CONTENT_WORD_THRESHOLD = 500;
+
+/** Min words per sub-page for thin content detection during multi-page crawl */
+export const THIN_PAGE_WORD_THRESHOLD = 300;
+
+/** PSI score >= this is "pass"; between WARNING and PASS_THRESHOLD is "warning" */
+export const PSI_PASS_THRESHOLD    = 80;
+export const PSI_WARNING_THRESHOLD = 50;
+
+/** Page weight thresholds in KB */
+export const PAGE_WEIGHT_PASS_KB    = 2_000;
+export const PAGE_WEIGHT_WARNING_KB = 5_000;
+
+/** Inline style attribute counts */
+export const INLINE_STYLES_PASS_THRESHOLD    = 5;
+export const INLINE_STYLES_WARNING_THRESHOLD = 20;
+
+/** SEO score grade boundaries (applied to any 0-100 score) */
+export const GRADE_SCORE_THRESHOLDS = [
+  { min: 95, grade: "A+" },
+  { min: 90, grade: "A"  },
+  { min: 85, grade: "A-" },
+  { min: 80, grade: "B+" },
+  { min: 75, grade: "B"  },
+  { min: 70, grade: "B-" },
+  { min: 60, grade: "C"  },
+  { min: 50, grade: "D"  },
+  { min: 0,  grade: "F"  },
+];
+
+/** Overall audit score threshold below which holistic issues are triggered */
+export const AUDIT_SCORE_ISSUE_THRESHOLD = 80;
+export const AUDIT_GRADE_FAIL_GRADES     = new Set(["C", "D", "F"]);
+
 export interface CompiledAudit {
   overallScore: number;
   overallGrade: string;
@@ -46,14 +86,9 @@ export interface CompiledAudit {
 }
 
 function getGrade(score: number): string {
-  if (score >= 95) return "A+";
-  if (score >= 90) return "A";
-  if (score >= 85) return "A-";
-  if (score >= 80) return "B+";
-  if (score >= 75) return "B";
-  if (score >= 70) return "B-";
-  if (score >= 60) return "C";
-  if (score >= 50) return "D";
+  for (const { min, grade } of GRADE_SCORE_THRESHOLDS) {
+    if (score >= min) return grade;
+  }
   return "F";
 }
 
@@ -196,14 +231,14 @@ export function compileFullSeoAudit(
 
   // Amount of Content (Word Count)
   const wordCount = scan?.wordCount ?? 0;
-  const wordStatus = wordCount >= 500 ? "pass" : "warning";
+  const wordStatus = wordCount >= THIN_CONTENT_WORD_THRESHOLD ? "pass" : "warning";
   onPageChecks.push({
     name: "word_count",
     label: "Amount of Content",
     status: wordStatus,
     value: `${wordCount} Words`,
-    description: "Longer, high-quality content generally ranks better. Aim for at least 500 words on key pages.",
-    recommendation: wordStatus === "pass" ? "Your page has a good level of textual content." : "Expand your page copy to include more detailed value descriptions and FAQs (at least 500 words).",
+    description: `Longer, high-quality content generally ranks better. Aim for at least ${THIN_CONTENT_WORD_THRESHOLD} words on key pages.`,
+    recommendation: wordStatus === "pass" ? "Your page has a good level of textual content." : `Expand your page copy to include more detailed value descriptions and FAQs (at least ${THIN_CONTENT_WORD_THRESHOLD} words).`,
   });
   onPageScoreSum += wordStatus === "pass" ? 100 : 60;
 
@@ -440,42 +475,42 @@ export function compileFullSeoAudit(
   const performanceChecks: AuditCheck[] = [];
   let perfSum = 0;
 
-  // PSI scores
-  const mobPsi = scan?.mobileScore ?? 75;
-  const deskPsi = scan?.desktopPerfScore ?? 92;
+  // PSI scores — use null when data is unavailable (never invent fake scores)
+  const mobPsi  = scan?.mobileScore      ?? null;
+  const deskPsi = scan?.desktopPerfScore ?? null;
 
   performanceChecks.push({
     name: "pagespeed_mobile",
     label: "Google PSI - Mobile",
-    status: mobPsi >= 80 ? "pass" : mobPsi >= 50 ? "warning" : "fail",
-    value: `${mobPsi}/100`,
+    status: mobPsi === null ? "info" : mobPsi >= PSI_PASS_THRESHOLD ? "pass" : mobPsi >= PSI_WARNING_THRESHOLD ? "warning" : "fail",
+    value: mobPsi === null ? "Not yet measured" : `${mobPsi.toFixed(0)}/100`,
     description: "PageSpeed Insights mobile evaluation simulates a mid-tier mobile connection.",
-    recommendation: mobPsi >= 80 ? "PSI mobile performance is good." : "Reduce unused JS and defer image loads to speed up mobile performance.",
+    recommendation: mobPsi === null ? "Run the analysis to fetch your PageSpeed score." : mobPsi >= PSI_PASS_THRESHOLD ? "PSI mobile performance is good." : "Reduce unused JS and defer image loads to speed up mobile performance.",
   });
-  perfSum += mobPsi;
+  if (mobPsi !== null) perfSum += mobPsi;
 
   performanceChecks.push({
     name: "pagespeed_desktop",
     label: "Google PSI - Desktop",
-    status: deskPsi >= 80 ? "pass" : deskPsi >= 50 ? "warning" : "fail",
-    value: `${deskPsi}/100`,
+    status: deskPsi === null ? "info" : deskPsi >= PSI_PASS_THRESHOLD ? "pass" : deskPsi >= PSI_WARNING_THRESHOLD ? "warning" : "fail",
+    value: deskPsi === null ? "Not yet measured" : `${deskPsi.toFixed(0)}/100`,
     description: "PSI desktop evaluation measures performance on high-speed cable connections.",
-    recommendation: deskPsi >= 80 ? "PSI desktop performance is excellent." : "Minimize layout shifts and combine CSS files.",
+    recommendation: deskPsi === null ? "Run the analysis to fetch your PageSpeed score." : deskPsi >= PSI_PASS_THRESHOLD ? "PSI desktop performance is excellent." : "Minimize layout shifts and combine CSS files.",
   });
-  perfSum += deskPsi;
+  if (deskPsi !== null) perfSum += deskPsi;
 
-  // Download Size
-  const weight = scan?.pageWeightKb ?? 850;
-  const weightStatus = weight <= 2000 ? "pass" : weight <= 5000 ? "warning" : "fail";
+  // Download Size — null when not yet measured (never invent an assumed weight)
+  const weight = scan?.pageWeightKb ?? null;
+  const weightStatus = weight === null ? "info" : weight <= PAGE_WEIGHT_PASS_KB ? "pass" : weight <= PAGE_WEIGHT_WARNING_KB ? "warning" : "fail";
   performanceChecks.push({
     name: "download_size",
     label: "Website Download Size",
     status: weightStatus,
-    value: `${(weight / 1024).toFixed(2)} MB`,
+    value: weight === null ? "Not yet measured" : `${(weight / 1024).toFixed(2)} MB`,
     description: "Large page weights increase data transfer costs and slow down page loading.",
-    recommendation: weightStatus === "pass" ? "Download size is under control." : "Compress heavy hero images and split large JS bundles.",
+    recommendation: weightStatus === "pass" ? "Download size is under control." : weightStatus === "info" ? "Run scan to measure download size." : "Compress heavy hero images and split large JS bundles.",
   });
-  perfSum += weightStatus === "pass" ? 100 : weightStatus === "warning" ? 60 : 30;
+  if (weight !== null) perfSum += weightStatus === "pass" ? 100 : weightStatus === "warning" ? 60 : 30;
 
   // Compression
   const compStatus = isCompressed ? "pass" : "fail";
@@ -490,7 +525,7 @@ export function compileFullSeoAudit(
   perfSum += compStatus === "pass" ? 100 : 0;
 
   // Inline Styles
-  const styleStatus = inlineStylesCount <= 5 ? "pass" : inlineStylesCount <= 20 ? "warning" : "fail";
+  const styleStatus = inlineStylesCount <= INLINE_STYLES_PASS_THRESHOLD ? "pass" : inlineStylesCount <= INLINE_STYLES_WARNING_THRESHOLD ? "warning" : "fail";
   performanceChecks.push({
     name: "inline_styles",
     label: "Inline Styles",

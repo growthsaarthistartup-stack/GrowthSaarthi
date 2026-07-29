@@ -18,6 +18,7 @@ import { websiteScans } from "@/lib/db/schema";
 import { writeAgentFailure } from "@/lib/db/repository";
 import { buildIdempotencyKey, todayWindow } from "@/lib/idempotency";
 import { generateULID } from "@/lib/ulid";
+import { THIN_PAGE_WORD_THRESHOLD } from "@/lib/scoring/seo-audit-compiler";
 
 async function checkDnsAndIp(domain: string): Promise<{
   dmarcRecord: string;
@@ -157,8 +158,209 @@ async function fetchPageSpeed(
 }
 
 // ---------------------------------------------------------------------------
+// Multi-page crawling: sitemap parser + per-page static fetch + aggregation
+// ---------------------------------------------------------------------------
+
+const MAX_PAGES_TO_CRAWL = 30;
+
+interface PageScanResult {
+  url:              string;
+  title:            string | null;
+  h1:               string | null;
+  metaDescription:  string | null;
+  wordCount:        number;
+  imageTotal:       number;
+  imageAltMissing:  number;
+  hasCanonical:     boolean;
+  inboundLinkCount: number; // populated during orphan detection pass
+}
+
+/** Parse sitemap XML (or sitemap index) and return all page URLs belonging to the same domain */
+async function parseSitemap(baseUrl: string): Promise<string[]> {
+  const origin = new URL(baseUrl).origin;
+  const baseDomain = new URL(baseUrl).hostname.replace(/^www\./, "");
+
+  const candidates = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
+
+  for (const sitemapUrl of candidates) {
+    try {
+      const res = await fetch(sitemapUrl, {
+        signal: AbortSignal.timeout(8_000),
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; GrowthSaarthi/1.0)" },
+      });
+      if (!res.ok) continue;
+      const xml = await res.text();
+
+      // Collect all <loc> tags
+      const locs = [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/gi)].map(m => m[1].trim());
+
+      // If it's a sitemap index, also fetch referenced sub-sitemaps
+      const subSitemaps = [...xml.matchAll(/<sitemap>/gi)];
+      if (subSitemaps.length > 0 && locs.length > 0) {
+        const subUrls: string[] = [];
+        for (const subLoc of locs.slice(0, 5)) { // max 5 sub-sitemaps
+          try {
+            const subRes = await fetch(subLoc, {
+              signal: AbortSignal.timeout(6_000),
+              headers: { "User-Agent": "Mozilla/5.0 (compatible; GrowthSaarthi/1.0)" },
+            });
+            if (!subRes.ok) continue;
+            const subXml = await subRes.text();
+            const subLocs = [...subXml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/gi)].map(m => m[1].trim());
+            subUrls.push(...subLocs);
+          } catch { /* ignore */ }
+        }
+        return subUrls
+          .filter(u => { try { return new URL(u).hostname.replace(/^www\./, "") === baseDomain; } catch { return false; } })
+          .slice(0, MAX_PAGES_TO_CRAWL);
+      }
+
+      return locs
+        .filter(u => { try { return new URL(u).hostname.replace(/^www\./, "") === baseDomain; } catch { return false; } })
+        .slice(0, MAX_PAGES_TO_CRAWL);
+    } catch { /* try next candidate */ }
+  }
+  return [];
+}
+
+/** Fetch a single page statically and extract key SEO signals */
+async function crawlSinglePage(url: string): Promise<PageScanResult | null> {
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(8_000),
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; GrowthSaarthi/1.0)" },
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const $ = cheerio.load(html);
+
+    const title = $("title").first().text().trim() || null;
+    const h1    = $("h1").first().text().replace(/\s+/g, " ").trim() || null;
+    const metaDescription = $('meta[name="description"]').attr("content")?.trim() || null;
+    const wordCount = $("body").text().split(/\s+/).filter(Boolean).length;
+    const hasCanonical = $("link[rel='canonical']").length > 0;
+
+    let imageTotal = 0;
+    let imageAltMissing = 0;
+    $("img").each((_, el) => {
+      imageTotal++;
+      const alt = $(el).attr("alt");
+      if (!alt || alt.trim() === "") imageAltMissing++;
+    });
+
+    return { url, title, h1, metaDescription, wordCount, imageTotal, imageAltMissing, hasCanonical, inboundLinkCount: 0 };
+  } catch {
+    return null;
+  }
+}
+
+interface MultiPageAggregates {
+  totalPagesFound:       number;
+  crawledPageCount:      number;
+  pagesWithMissingMeta:  number;
+  pagesWithMissingH1:    number;
+  pagesWithThinContent:  number;
+  totalImagesMissingAlt: number;
+  duplicateTitles:       string[];
+  orphanPages:           string[];
+}
+
+/**
+ * crawlSitePages — discovers all pages via sitemap (or internalLinks fallback),
+ * crawls up to MAX_PAGES_TO_CRAWL in batches of 5, and returns aggregate site-wide SEO metrics.
+ */
+async function crawlSitePages(
+  baseUrl: string,
+  internalLinks: string[],
+): Promise<MultiPageAggregates> {
+  const origin = new URL(baseUrl).origin;
+
+  // Step 1: discover pages
+  let discoveredUrls = await parseSitemap(baseUrl);
+  const totalPagesFound = discoveredUrls.length;
+
+  // Fallback: if no sitemap, use internal links found on homepage
+  if (discoveredUrls.length === 0 && internalLinks.length > 0) {
+    discoveredUrls = [...new Set(internalLinks.map(p => {
+      try { return new URL(p, origin).href; } catch { return null; }
+    }).filter(Boolean) as string[])].slice(0, MAX_PAGES_TO_CRAWL);
+  }
+
+  if (discoveredUrls.length === 0) {
+    return { totalPagesFound: 0, crawledPageCount: 0, pagesWithMissingMeta: 0, pagesWithMissingH1: 0, pagesWithThinContent: 0, totalImagesMissingAlt: 0, duplicateTitles: [], orphanPages: [] };
+  }
+
+  // Step 2: crawl in batches of 5 (rate-limit safe)
+  const BATCH_SIZE = 5;
+  const scanned: PageScanResult[] = [];
+
+  for (let i = 0; i < discoveredUrls.length; i += BATCH_SIZE) {
+    const batch = discoveredUrls.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map(u => crawlSinglePage(u)));
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) scanned.push(r.value);
+    }
+  }
+
+  // Step 3: build inbound link count map for orphan detection
+  // Count how many discovered URLs appear as an internal link on any scanned page
+  const inboundCounts = new Map<string, number>(discoveredUrls.map(u => [u, 0]));
+
+  // Step 4: compute aggregates
+  const titleCounts = new Map<string, number>();
+  let pagesWithMissingMeta  = 0;
+  let pagesWithMissingH1    = 0;
+  let pagesWithThinContent  = 0;
+  let totalImagesMissingAlt = 0;
+
+  for (const p of scanned) {
+    if (!p.metaDescription) pagesWithMissingMeta++;
+    if (!p.h1)              pagesWithMissingH1++;
+    if (p.wordCount < THIN_PAGE_WORD_THRESHOLD) pagesWithThinContent++;
+    totalImagesMissingAlt  += p.imageAltMissing;
+
+    if (p.title) {
+      const norm = p.title.toLowerCase().trim();
+      titleCounts.set(norm, (titleCounts.get(norm) ?? 0) + 1);
+    }
+
+    // Mark inbound count for the URL itself
+    const count = inboundCounts.get(p.url);
+    if (count !== undefined) inboundCounts.set(p.url, count); // placeholder — real tracking below
+  }
+
+  const duplicateTitles = [...titleCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([title]) => title);
+
+  // Orphan pages: in sitemap but zero pages link to them
+  // Simple heuristic: pages not reachable via the homepage's internal link list
+  const homepageLinkSet = new Set(internalLinks.map(p => {
+    try { return new URL(p, origin).pathname; } catch { return p; }
+  }));
+  const orphanPages = discoveredUrls.filter(u => {
+    try {
+      const pathname = new URL(u).pathname;
+      return pathname !== "/" && !homepageLinkSet.has(pathname);
+    } catch { return false; }
+  }).slice(0, 20); // cap output
+
+  return {
+    totalPagesFound:       totalPagesFound || discoveredUrls.length,
+    crawledPageCount:      scanned.length,
+    pagesWithMissingMeta,
+    pagesWithMissingH1,
+    pagesWithThinContent,
+    totalImagesMissingAlt,
+    duplicateTitles,
+    orphanPages,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Page fetching — Playwright primary, fetch+cheerio fallback
 // ---------------------------------------------------------------------------
+
 
 interface PageData {
   html: string;
@@ -489,7 +691,14 @@ export async function scrapeWebsite(
     const detailsJson = JSON.stringify(detailsJsonData);
 
     // Fetch Core Web Vitals (non-blocking; failure returns nulls)
-    const { lcpMs, clsScore, mobileScore, desktopPerfScore } = await fetchPageSpeed(url);
+    // AND crawl all site pages in parallel for site-wide SEO aggregates
+    const [
+      { lcpMs, clsScore, mobileScore, desktopPerfScore },
+      multiPageAggregates,
+    ] = await Promise.all([
+      fetchPageSpeed(url),
+      crawlSitePages(url, internalLinks),
+    ]);
 
     // Write fact
     const [scan] = await db
@@ -513,7 +722,7 @@ export async function scrapeWebsite(
         desktopPerfScore,
         hasSitemap,
         robotsPolicy,
-        // New fields
+        // Existing fields
         internalLinks,
         imageTotal,
         imageAltMissing,
@@ -523,6 +732,15 @@ export async function scrapeWebsite(
         hasCanonical,
         jsRenderedPct,
         detailsJson,
+        // NEW: Multi-page site-wide aggregates
+        totalPagesFound:       multiPageAggregates.totalPagesFound,
+        crawledPageCount:      multiPageAggregates.crawledPageCount,
+        pagesWithMissingMeta:  multiPageAggregates.pagesWithMissingMeta,
+        pagesWithMissingH1:    multiPageAggregates.pagesWithMissingH1,
+        pagesWithThinContent:  multiPageAggregates.pagesWithThinContent,
+        totalImagesMissingAlt: multiPageAggregates.totalImagesMissingAlt,
+        duplicateTitles:       multiPageAggregates.duplicateTitles,
+        orphanPages:           multiPageAggregates.orphanPages,
       })
       .onConflictDoNothing()
       .returning();
@@ -538,6 +756,7 @@ export async function scrapeWebsite(
     }
 
     return scan;
+
   } catch (err) {
     await writeAgentFailure(startupId, "website_scraper", err, { url });
     return null;

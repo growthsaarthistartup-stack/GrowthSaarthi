@@ -1,31 +1,33 @@
+/**
+ * GET /api/seo-audit
+ *
+ * Returns the compiled full SEO audit for the authenticated user's startup.
+ * Combines: website scan facts + SEOScoreAPI audit cache + GEO score + keywords.
+ */
+
 import type { NextRequest } from "next/server";
 import { eq, desc } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { startups, websiteScans, seoAudits, geoScores, keywords } from "@/lib/db/schema";
 import { compileFullSeoAudit } from "@/lib/scoring/seo-audit-compiler";
+import { requireStartupAuth } from "@/lib/api-auth";
 
 export async function GET(request: NextRequest): Promise<Response> {
-  const url = request.nextUrl.searchParams.get("url");
-  const startupIdParam = request.nextUrl.searchParams.get("startupId");
-
-  if (!url) {
-    return Response.json({ error: "url is required" }, { status: 400 });
-  }
+  const auth = await requireStartupAuth(request);
+  if (auth.error) return auth.error;
+  const startupId = auth.startupId!;
 
   try {
-    // 1. Resolve startup
-    let startup: any = null;
-    if (startupIdParam) {
-      [startup] = await db.select().from(startups).where(eq(startups.id, startupIdParam)).limit(1);
-    } else {
-      [startup] = await db.select().from(startups).where(eq(startups.url, url)).limit(1);
-    }
+    // 1. Fetch startup (for industry/stage context in the compiler)
+    const [startup] = await db
+      .select()
+      .from(startups)
+      .where(eq(startups.id, startupId))
+      .limit(1);
 
     if (!startup) {
-      return Response.json({ ok: false, error: "Startup not found for this URL" });
+      return Response.json({ ok: false, error: "Startup not found" }, { status: 404 });
     }
-
-    const startupId = startup.id;
 
     // 2. Fetch latest website scan
     const [scan] = await db
@@ -36,10 +38,10 @@ export async function GET(request: NextRequest): Promise<Response> {
       .limit(1);
 
     if (!scan) {
-      return Response.json({ ok: false, error: "Website scan not found for this startup" });
+      return Response.json({ ok: false, error: "No website scan found — run a scan first" }, { status: 404 });
     }
 
-    // 3. Fetch latest cached audit
+    // 3. Fetch latest cached SEOScoreAPI audit
     const [latestAudit] = await db
       .select()
       .from(seoAudits)
@@ -47,11 +49,11 @@ export async function GET(request: NextRequest): Promise<Response> {
       .orderBy(desc(seoAudits.createdAt))
       .limit(1);
 
-    let auditData: any = null;
+    let auditData: Record<string, unknown> | null = null;
     if (latestAudit?.rawJson) {
       try {
-        auditData = JSON.parse(latestAudit.rawJson);
-      } catch { /* ignore */ }
+        auditData = JSON.parse(latestAudit.rawJson) as Record<string, unknown>;
+      } catch { /* ignore malformed cache */ }
     }
 
     // 4. Fetch latest GEO score
@@ -70,12 +72,12 @@ export async function GET(request: NextRequest): Promise<Response> {
       .orderBy(desc(keywords.createdAt))
       .limit(50);
 
-    // 6. Compile
-    const compiledAudit = compileFullSeoAudit(scan, auditData, geo, allKeywords, startup);
+    // 6. Compile the full audit report
+    const compiledAudit = compileFullSeoAudit(scan, auditData, geo ?? null, allKeywords, startup);
 
     return Response.json({ ok: true, audit: compiledAudit });
-  } catch (err: any) {
+  } catch (err) {
     console.error("[api/seo-audit] Failed:", err);
-    return Response.json({ ok: false, error: err.message }, { status: 500 });
+    return Response.json({ ok: false, error: "Failed to compile SEO audit" }, { status: 500 });
   }
 }
