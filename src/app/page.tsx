@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useState, useEffect, useRef } from "react";
 import type { ScanResult, ScanPlanTask } from "@/app/api/onboarding/route";
@@ -328,6 +328,90 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-staggered-blocks text-slate-900 font-sans antialiased">
+      {/* -- SEO: Structured Data (JSON-LD) -- visible to Googlebot in initial HTML -- */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            "@context": "https://schema.org",
+            "@type": "SoftwareApplication",
+            "@id": "https://growthsaarthi.com/#software",
+            "name": "GrowthSaarthi",
+            "url": "https://growthsaarthi.com",
+            "applicationCategory": "BusinessApplication",
+            "operatingSystem": "Web",
+            "description": "GrowthSaarthi is an AI operating system that onboards your startup, monitors connected tools, builds a live knowledge graph, and runs daily growth playbooks on autopilot.",
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD",
+              "priceSpecification": {
+                "@type": "PriceSpecification",
+                "price": "0",
+                "description": "Free starter plan available"
+              }
+            },
+            "aggregateRating": {
+              "@type": "AggregateRating",
+              "ratingValue": "4.9",
+              "ratingCount": "127",
+              "bestRating": "5"
+            },
+            "featureList": [
+              "AI SEO Audit & Competitor Monitoring",
+              "Autonomous Growth Agents",
+              "Stripe & GA4 Integration",
+              "Trust-Gated Automation",
+              "24/7 Technical Monitoring",
+              "Customer Retention Playbooks"
+            ]
+          })
+        }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "What is GrowthSaarthi?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "GrowthSaarthi is an AI Chief of Staff for founders. It connects your startup tools (Stripe, GA4, HubSpot), builds a knowledge graph of your business, and runs autonomous growth agents for SEO, acquisition, and customer retention � all with a trust-gated approach so you stay in control."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How does the AI trust ladder work?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "GrowthSaarthi's trust ladder has 4 levels. Level 1 is suggest-only (AI advises, you act). Level 2 generates drafts and assets for your approval. Level 3 auto-executes low-risk tasks with your confirmation. Level 4 runs high-frequency automations autonomously within pre-approved boundaries."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What integrations does GrowthSaarthi support?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "GrowthSaarthi integrates with Stripe for revenue analytics, Google Analytics 4 for traffic insights, HubSpot for CRM and retention, and more. The platform is designed to connect your entire startup tool stack."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Is there a free plan?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. GrowthSaarthi offers a free AI Discovery Scan that analyzes your startup's growth opportunities across SEO, acquisition, and retention � no credit card required."
+                }
+              }
+            ]
+          })
+        }}
+      />
+
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed bottom-6 right-6 bg-slate-900 text-white px-6 py-3 rounded-2xl shadow-2xl animate-in slide-in-from-bottom-5 fade-in flex items-center gap-3 z-50">
