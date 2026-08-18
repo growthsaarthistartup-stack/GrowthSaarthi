@@ -23,6 +23,8 @@ import { discoverCompetitors } from "@/lib/agents/competitor-agent";
 import { runSeoIngestion } from "@/lib/agents/seo-agent";
 import { writeAgentFailure } from "@/lib/db/repository";
 
+export const maxDuration = 300;
+
 // ---------------------------------------------------------------------------
 // Auth — same pattern as daily route
 // ---------------------------------------------------------------------------

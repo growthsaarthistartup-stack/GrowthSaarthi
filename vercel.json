@@ -1,4 +1,6 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "NODE_OPTIONS=--max-old-space-size=4096 npm run build",
   "crons": [
     {
       "path": "/api/cron/daily",

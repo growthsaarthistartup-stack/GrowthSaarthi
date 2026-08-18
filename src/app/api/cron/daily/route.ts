@@ -19,6 +19,8 @@ import { runGaIngestion } from "@/lib/agents/ga-agent";
 import { checkStartupAnomalies } from "@/lib/monitoring/anomaly-detector";
 import { writeAgentFailure } from "@/lib/db/repository";
 
+export const maxDuration = 300;
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@
 }
 
 @theme {
+  --font-sans: "Inter", "Segoe UI", Roboto, Arial, sans-serif;
+
   --color-brand-navy: #0B1A47;
   --color-brand-gold: #E79E24;
   --color-brand-teal: #199874;
