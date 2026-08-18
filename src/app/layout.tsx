@@ -82,8 +82,7 @@ export const metadata: Metadata = {
   colorScheme: "light",
   category: "technology",
 
-  // Add Google Search Console verification token here when ready:
-  // verification: { google: "YOUR_TOKEN_HERE" },
+  verification: { google: "AaKuCLqz4Op8z8oo-Js991d--8SGn78VbcGgG-SboTg" },
 };
 
 // JSON-LD: Organization schema (site-wide, server-rendered)
